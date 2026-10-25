@@ -185,6 +185,14 @@ fn install_io() {
         groups: cadcraft_io::entity_groups,
         entity: cadcraft_io::entity_from_groups,
     });
+    // PDF underlays (PDFATTACH) read their pages.
+    cadcraft_engine::cmd::underlay::set_pdf(cadcraft_engine::cmd::underlay::PdfHooks {
+        page: cadcraft_io::pdf_read::page_info,
+        render: cadcraft_io::pdf_read::render_page,
+        region: cadcraft_io::pdf_read::render_page_region,
+        layers: cadcraft_io::pdf_layers::layer_list,
+        with_layers: cadcraft_io::pdf_layers::apply_layers,
+    });
 }
 
 fn open(s: &mut Session, path: &str) -> Result<(), String> {
@@ -293,12 +301,19 @@ fn convert(args: &[String]) -> Result<(), String> {
 }
 
 /// The warning for the model-space entities of `path` an image can't show, by type (those kept
-/// as unknown objects, `Proxy` in `info`), or `None` when there are none.
+/// as unknown objects, `Proxy` in `info`, and PDF underlays, whose page isn't plotted), or `None`
+/// when there are none.
 fn undrawn_message(d: &cadcraft_engine::doc::Drawing, path: &str) -> Option<String> {
     let mut types: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for e in d.model.iter() {
-        if let cadcraft_engine::doc::EntityKind::Unknown(u) = &e.kind {
-            let n = types.entry(u.dxf_type.as_str()).or_insert(0);
+        // PDF underlays' pages aren't plotted yet: only their frame is.
+        let undrawn = match &e.kind {
+            cadcraft_engine::doc::EntityKind::Unknown(u) => Some(u.dxf_type.as_str()),
+            cadcraft_engine::doc::EntityKind::PdfUnderlay(_) => Some("PDFUNDERLAY"),
+            _ => None,
+        };
+        if let Some(t) = undrawn {
+            let n = types.entry(t).or_insert(0);
             *n = n.saturating_add(1);
         }
     }

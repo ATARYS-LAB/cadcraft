@@ -98,6 +98,99 @@ pub struct DisplayList {
     /// Plot style end, join and fill style per primitive (parallel to `prims`; missing entries
     /// are "use object"), turned into geometry by [`pen::apply`].
     pub pens: Vec<Pen>,
+    /// PDF underlays' pages, in drawing order: the space's own and, in a layout, model space's
+    /// seen through each viewport (not those in blocks). The UI and plotters draw each page
+    /// before primitive [`ListUnderlay::at`], so objects drawn earlier are under it and later
+    /// ones over it (DRAWORDER).
+    pub underlays: Vec<ListUnderlay>,
+}
+
+/// A PDF underlay's page as a display list draws it: the underlay entity, the primitive it is
+/// drawn before, the page's lower-left corner and width/height vectors in the list's units
+/// (paper units for model space seen through a viewport), and what it is clipped to.
+#[derive(Clone, Debug)]
+pub struct ListUnderlay {
+    pub handle: Handle,
+    pub at: u32,
+    pub origin: Vec2,
+    pub u: Vec2,
+    pub v: Vec2,
+    pub clip: PageClip,
+    /// The underlay's own clip boundary (PDFCLIP), in the list's units; applied before `clip`.
+    pub own: Option<std::sync::Arc<clip::PolyClip>>,
+    /// `own` is inverted: the page is drawn outside it.
+    pub inverted: bool,
+}
+
+/// The PDF underlay a display list's page belongs to: a drawing's object, or one in a block
+/// definition (a page seen through a block reference).
+pub fn pdf_underlay(d: &cadcraft_doc::Drawing, h: Handle) -> Option<&cadcraft_doc::PdfUnderlay> {
+    let e = d.entity(h).or_else(|| d.blocks.values().find_map(|b| b.entities.get(h)))?;
+    match &e.kind {
+        EntityKind::PdfUnderlay(u) => Some(u),
+        _ => None,
+    }
+}
+
+/// What a page is clipped to: nothing, or the viewport it is seen through.
+#[derive(Clone, Debug)]
+pub enum PageClip {
+    None,
+    Rect(Bounds2),
+    Poly(std::sync::Arc<clip::PolyClip>),
+}
+
+impl ListUnderlay {
+    /// The part of the page drawn, as triangles (three vertices each) in the list's units.
+    pub fn triangles(&self) -> Vec<Vec2> {
+        let (o, u, v) = (self.origin, self.u, self.v);
+        let tris = [o, o + u, o + u + v, o, o + u + v, o + v];
+        let tris = match &self.own {
+            Some(c) if self.inverted => {
+                // The page less the boundary (even-odd), kept on the page.
+                let quad = [o, o + u, o + u + v, o + v];
+                let outside = crate::fill::triangulate_evenodd(&[quad.to_vec(), c.polygon().to_vec()]);
+                match clip::PolyClip::new(&quad) {
+                    Some(page) => page.clip_triangles(&outside),
+                    None => Vec::new(),
+                }
+            }
+            Some(c) => c.clip_triangles(&tris),
+            None => tris.to_vec(),
+        };
+        match &self.clip {
+            PageClip::None => tris,
+            PageClip::Rect(r) => clip::clip_triangles(&tris, r),
+            PageClip::Poly(c) => c.clip_triangles(&tris),
+        }
+    }
+
+    /// Only part of the page is drawn (its own clip boundary or a viewport's).
+    pub fn is_clipped(&self) -> bool {
+        self.own.is_some() || !matches!(self.clip, PageClip::None)
+    }
+
+    /// Where point `p` (list units) is on the page, as fractions of its width and height from
+    /// its lower-left corner; `None` for a page of no area.
+    pub fn fraction(&self, p: Vec2) -> Option<Vec2> {
+        let (u, v) = (self.u, self.v);
+        let det = u.x * v.y - u.y * v.x;
+        if !det.is_finite() || det.abs() < 1e-300 {
+            return None;
+        }
+        let d = p - self.origin;
+        let f = Vec2::new((d.x * v.y - d.y * v.x) / det, (u.x * d.y - u.y * d.x) / det);
+        f.is_finite().then_some(f)
+    }
+
+    /// The part of the page drawn, as page fractions `[left, bottom, right, top]`; `None` when
+    /// none of it is.
+    pub fn shown(&self) -> Option<[f64; 4]> {
+        let fr: Vec<Vec2> = self.triangles().into_iter().filter_map(|p| self.fraction(p)).collect();
+        let b = Bounds2::from_points(fr);
+        let r = [b.min.x.max(0.0), b.min.y.max(0.0), b.max.x.min(1.0), b.max.y.min(1.0)];
+        (!b.is_empty() && r.iter().all(|x| x.is_finite()) && r[2] > r[0] && r[3] > r[1]).then_some(r)
+    }
 }
 
 /// A glyph of plotted text: the font glyph and, in world coordinates, where it sits. It is
@@ -606,6 +699,7 @@ fn append(dst: &mut DisplayList, src: DisplayList) {
         t
     }));
     dst.pens.extend(src.pens);
+    dst.underlays.extend(src.underlays.into_iter().map(|u| ListUnderlay { at: u.at + prims, ..u }));
     dst.bounds = dst.bounds.union(&src.bounds);
     dst.expanded = dst.expanded.saturating_add(src.expanded);
 }
@@ -824,7 +918,17 @@ enum Clip<'a> {
 
 /// Append `src` to `dst`, clipped to `clip`.
 fn append_clipped(dst: &mut DisplayList, src: &DisplayList, clip: &Clip) {
-    for p in &src.prims {
+    // Underlay pages keep their place among the clipped primitives and are clipped alike.
+    let page_clip = || match clip {
+        Clip::Rect(r) => PageClip::Rect(*r),
+        Clip::Poly(c) => PageClip::Poly(std::sync::Arc::new((*c).clone())),
+    };
+    let page_clip = if src.underlays.is_empty() { PageClip::None } else { page_clip() };
+    let mut pages = src.underlays.iter().peekable();
+    for (i, p) in src.prims.iter().enumerate() {
+        while let Some(u) = pages.next_if(|u| u.at as usize <= i) {
+            dst.underlays.push(ListUnderlay { at: dst.prims.len() as u32, clip: page_clip.clone(), ..u.clone() });
+        }
         let pts = src.points(p);
         match (p.kind, clip) {
             (Kind::Polyline, Clip::Rect(rect)) => {
@@ -871,6 +975,9 @@ fn append_clipped(dst: &mut DisplayList, src: &DisplayList, clip: &Clip) {
                 }
             }
         }
+    }
+    for u in pages {
+        dst.underlays.push(ListUnderlay { at: dst.prims.len() as u32, clip: page_clip.clone(), ..u.clone() });
     }
 }
 
@@ -1068,6 +1175,27 @@ fn entity_parts(b: &mut Builder, ctx: &Ctx, e: &Entity) {
     let (rgb, lw, lt, ltscale, visible, layer_transparency) = resolve(ctx, e, b.plotting);
     if !visible {
         return;
+    }
+    // A PDF underlay's page goes before its frame (in a block too, placed by the reference); an
+    // unloaded one shows neither, a hidden one only its frame.
+    if let EntityKind::PdfUnderlay(u) = &e.kind
+        && !u.unloaded
+        && !u.hidden
+    {
+        let (au, av) = u.axes();
+        b.list.underlays.push(ListUnderlay {
+            handle: e.handle,
+            at: b.list.prims.len() as u32,
+            origin: ctx.xf.apply(u.insert.xy()),
+            u: ctx.xf.apply_vec(au),
+            v: ctx.xf.apply_vec(av),
+            clip: PageClip::None,
+            own: u
+                .clip_outline()
+                .and_then(|o| clip::PolyClip::new(&o.into_iter().map(|p| ctx.xf.apply(p)).collect::<Vec<_>>()))
+                .map(std::sync::Arc::new),
+            inverted: u.clip_inverted,
+        });
     }
     if b.opts.transparency {
         b.transparency = transparency(e.common.transparency, layer_transparency, ctx.block_transparency);
@@ -1311,6 +1439,24 @@ fn entity_parts(b: &mut Builder, ctx: &Ctx, e: &Entity) {
             }
             for l in &fig.lines {
                 b.polyline(ctx, rgb, lw, l);
+            }
+        }
+        EntityKind::PdfUnderlay(u) if u.unloaded => {}
+        EntityKind::PdfUnderlay(u) => {
+            // The frame (its clip boundary when clipped) per PDFFRAME: 0 = none, 1 = shown and
+            // plotted, 2 = shown but not plotted.
+            let frame = match ctx.d.header.i64("PDFFRAME", 1) {
+                0 => false,
+                2 => !b.plotting,
+                _ => true,
+            };
+            if frame {
+                for mut pts in u.frames() {
+                    if let Some(f) = pts.first().copied() {
+                        pts.push(f);
+                    }
+                    stroke(b, &pts);
+                }
             }
         }
         kind => {

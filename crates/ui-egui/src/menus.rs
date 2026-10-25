@@ -246,7 +246,7 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
             Ok(Value::Null)
         }
         // Typed or chosen from a menu or the tool bar: ask for the file (or show the preview).
-        "export" | "exp" | "import" | "imp" | "publish" | "preview" | "pre" if params.is_null() && app.session.state().is_ok() => {
+        "export" | "exp" | "import" | "imp" | "pdfattach" | "publish" | "preview" | "pre" if params.is_null() && app.session.state().is_ok() => {
             return Some(crate::exchange::route(app, id));
         }
         "ui.toggle.statusbar" => {

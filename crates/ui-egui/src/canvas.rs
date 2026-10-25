@@ -137,6 +137,8 @@ pub struct CanvasState {
     hover_cycle: Option<(Pos2, Vec<Handle>, usize)>,
     /// What the cycling list and the Shift+Space highlight were made for (see [`CycleKey`]).
     cycle_key: Option<CycleKey>,
+    /// PDF underlay pages read for the canvas.
+    pub(crate) underlays: underlay::Cache,
 }
 
 /// The command, prompt, drawing (and its revision) and view that the objects under the cursor
@@ -531,10 +533,19 @@ fn ensure_vp_content(app: &mut CadApp, xf_paper: &Xf, ctx: &egui::Context) -> Op
 /// Draw the active viewport's contents (see [`VpContent`]) as [`ensure_vp_content`] set out;
 /// `p` clips them to the viewport's rectangle, and a clipped viewport's outline is masked with
 /// the stencil buffer first.
-fn draw_vp_content(c: &mut VpContent, gpu: bool, p: &egui::Painter, f: &VpFrame, xf_paper: &Xf, bg: Rgb, lwdisplay: bool) {
+fn draw_vp_content(
+    c: &mut VpContent,
+    gpu: bool,
+    p: &egui::Painter,
+    f: &VpFrame,
+    xf_paper: &Xf,
+    pages: Vec<(usize, Shape)>,
+    bg: Rgb,
+    lwdisplay: bool,
+) {
     let xf = &f.xf;
     if !gpu {
-        draw_list(p, xf, &c.list, bg, lwdisplay);
+        draw_list_with_pages(p, xf, &c.list, pages, bg, lwdisplay);
         return;
     }
     let mut stencil = crate::gpu::Stencil::Off;
@@ -558,20 +569,24 @@ fn draw_vp_content(c: &mut VpContent, gpu: bool, p: &egui::Painter, f: &VpFrame,
         c.mesh_origin = origin;
     }
     let center = xf.rect.center();
-    p.add(egui_wgpu::Callback::new_paint_callback(
-        xf.rect,
-        crate::gpu::CanvasCallback {
-            key,
-            slot: c.mesh_slot.clone(),
-            offset: [(c.mesh_origin.x - xf.center.x) as f32, (c.mesh_origin.y - xf.center.y) as f32],
-            scale: xf.scale as f32,
-            center: [center.x, center.y],
-            layer: crate::gpu::LAYER_VIEWPORT,
-            xform: crate::gpu::IDENTITY_XFORM,
-            dash: 0.0,
-            stencil,
-        },
-    ));
+    let draw = |groups: std::ops::Range<usize>| {
+        p.add(egui_wgpu::Callback::new_paint_callback(
+            xf.rect,
+            crate::gpu::CanvasCallback {
+                key,
+                slot: c.mesh_slot.clone(),
+                offset: [(c.mesh_origin.x - xf.center.x) as f32, (c.mesh_origin.y - xf.center.y) as f32],
+                scale: xf.scale as f32,
+                center: [center.x, center.y],
+                layer: crate::gpu::LAYER_VIEWPORT,
+                xform: crate::gpu::IDENTITY_XFORM,
+                dash: 0.0,
+                stencil,
+                groups,
+            },
+        ));
+    };
+    draw_groups_with_pages(p, &c.list, pages, draw);
 }
 
 /// Mask a clipped viewport's `outline` (paper units) in the stencil buffer: a triangle fan from
@@ -625,6 +640,7 @@ fn draw_vp_mask(c: &mut VpContent, p: &egui::Painter, outline: &[Vec2], xf_paper
             xform: crate::gpu::IDENTITY_XFORM,
             dash: 0.0,
             stencil: crate::gpu::Stencil::Mask,
+            groups: crate::gpu::ALL_GROUPS,
         },
     ));
 }
@@ -772,10 +788,31 @@ fn clip_infinite(xf: &Xf, base: Vec2, dir: Vec2, ray: bool) -> Option<[Pos2; 2]>
 
 /// Draw a display list.
 pub(crate) fn draw_list(p: &egui::Painter, xf: &Xf, list: &DisplayList, bg: Rgb, lwdisplay: bool) {
+    draw_prims(p, xf, list, 0..list.prims.len(), bg, lwdisplay);
+}
+
+/// [`draw_list`] with PDF underlay pages (`pages`, from [`underlay::shapes`] for `list`) drawn
+/// at their places among the objects.
+fn draw_list_with_pages(p: &egui::Painter, xf: &Xf, list: &DisplayList, pages: Vec<(usize, Shape)>, bg: Rgb, lwdisplay: bool) {
+    let mut pages: Vec<(usize, Shape)> = pages.into_iter().map(|(j, s)| (list.underlays.get(j).map_or(0, |u| u.at as usize), s)).collect();
+    pages.sort_by_key(|(i, _)| *i);
+    let mut from = 0;
+    for (i, page) in pages {
+        let i = i.min(list.prims.len()).max(from);
+        draw_prims(p, xf, list, from..i, bg, lwdisplay);
+        p.add(page);
+        from = i;
+    }
+    draw_prims(p, xf, list, from..list.prims.len(), bg, lwdisplay);
+}
+
+/// Draw primitives `range` of `list`.
+fn draw_prims(p: &egui::Painter, xf: &Xf, list: &DisplayList, range: std::ops::Range<usize>, bg: Rgb, lwdisplay: bool) {
     let vis = xf.world_bounds();
-    let mut shapes: Vec<Shape> = Vec::with_capacity(list.prims.len());
+    let prims = list.prims.get(range).unwrap_or_default();
+    let mut shapes: Vec<Shape> = Vec::with_capacity(prims.len());
     let px = 1.0 / xf.scale;
-    for prim in &list.prims {
+    for prim in prims {
         let col = prim_color32(prim, bg);
         let pts = list.points(prim);
         match prim.kind {
@@ -884,6 +921,7 @@ fn draw_highlight_gpu(
             xform: crate::gpu::IDENTITY_XFORM,
             dash: if look.dashed { 10.0 } else { 0.0 },
             stencil,
+            groups: crate::gpu::ALL_GROUPS,
         },
     ));
 }
@@ -950,6 +988,7 @@ fn draw_drag_gpu(
             xform: [m.a as f32, m.b as f32, m.c as f32, m.d as f32, t.x as f32, t.y as f32],
             dash: 0.0,
             stencil: crate::gpu::Stencil::Off,
+            groups: crate::gpu::ALL_GROUPS,
         },
     ));
 }
@@ -964,7 +1003,7 @@ fn list_mesh_key(key: &ListKey, list_gen: u64, origin: Vec2, bg: Rgb, lwdisplay:
 
 /// Draw the display list through the GPU paint callback (uploading it when it changed), plus
 /// the infinite lines, which are clipped to the view on the CPU every frame.
-fn draw_list_gpu(c: &mut CanvasState, p: &egui::Painter, xf: &Xf, bg: Rgb, lwdisplay: bool) {
+fn draw_list_gpu(c: &mut CanvasState, p: &egui::Painter, xf: &Xf, pages: Vec<(usize, Shape)>, bg: Rgb, lwdisplay: bool) {
     let Some(list) = &c.list else { return };
     let origin = crate::gpu::choose_origin(&list.bounds, xf.center, f64::from(xf.rect.height()) / xf.scale.max(1e-300));
     let key = list_mesh_key(&c.key, c.list_gen, origin, bg, lwdisplay);
@@ -980,20 +1019,24 @@ fn draw_list_gpu(c: &mut CanvasState, p: &egui::Painter, xf: &Xf, bg: Rgb, lwdis
         c.mesh_ms = crate::now_ms() - t0;
     }
     let center = xf.rect.center();
-    p.add(egui_wgpu::Callback::new_paint_callback(
-        xf.rect,
-        crate::gpu::CanvasCallback {
-            key,
-            slot: c.mesh_slot.clone(),
-            offset: [(c.mesh_origin.x - xf.center.x) as f32, (c.mesh_origin.y - xf.center.y) as f32],
-            scale: xf.scale as f32,
-            center: [center.x, center.y],
-            layer: crate::gpu::LAYER_DRAWING,
-            xform: crate::gpu::IDENTITY_XFORM,
-            dash: 0.0,
-            stencil: crate::gpu::Stencil::Off,
-        },
-    ));
+    let draw = |groups: std::ops::Range<usize>| {
+        p.add(egui_wgpu::Callback::new_paint_callback(
+            xf.rect,
+            crate::gpu::CanvasCallback {
+                key,
+                slot: c.mesh_slot.clone(),
+                offset: [(c.mesh_origin.x - xf.center.x) as f32, (c.mesh_origin.y - xf.center.y) as f32],
+                scale: xf.scale as f32,
+                center: [center.x, center.y],
+                layer: crate::gpu::LAYER_DRAWING,
+                xform: crate::gpu::IDENTITY_XFORM,
+                dash: 0.0,
+                stencil: crate::gpu::Stencil::Off,
+                groups,
+            },
+        ));
+    };
+    draw_groups_with_pages(p, list, pages, draw);
     let mut shapes = Vec::new();
     for prim in c.infinite.iter().filter_map(|i| list.prims.get(*i)) {
         let pts = list.points(prim);
@@ -1004,6 +1047,26 @@ fn draw_list_gpu(c: &mut CanvasState, p: &egui::Painter, xf: &Xf, bg: Rgb, lwdis
         }
     }
     p.extend(shapes);
+}
+
+/// Draw `list`'s GPU mesh by draw-order groups (`draw` adds the paint callback for a range of
+/// them), with PDF underlay pages (`pages`, from [`underlay::shapes`]) between the groups their
+/// underlays break the mesh at.
+fn draw_groups_with_pages(p: &egui::Painter, list: &DisplayList, pages: Vec<(usize, Shape)>, draw: impl Fn(std::ops::Range<usize>)) {
+    let mut from = 0;
+    if !pages.is_empty() {
+        let groups = crate::gpu::underlay_groups(list);
+        let mut pages: Vec<(usize, Shape)> = pages.into_iter().map(|(j, s)| (groups.get(j).copied().unwrap_or(0), s)).collect();
+        pages.sort_by_key(|(g, _)| *g);
+        for (g, page) in pages {
+            if g > from {
+                draw(from..g);
+                from = g;
+            }
+            p.add(page);
+        }
+    }
+    draw(from..usize::MAX);
 }
 
 /// How a highlight is drawn: lines `width` points wide, and either solid with fills filled or
@@ -1818,13 +1881,25 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     if let Some(f) = ensure_vp_content(app, &xf_paper, ui.ctx()) {
         let gpu = app.canvas.gpu.is_some();
         let clipped = painter.with_clip_rect(f.on_screen.intersect(rect));
-        draw_vp_content(&mut app.canvas.vp, gpu, &clipped, &f, &xf_paper, bg, app.session.settings.lwdisplay);
+        // Its PDF underlays' pages, clipped to a clipped viewport's outline (in list units: the
+        // list moves with the viewport's view, see `vp_motion`).
+        let lus = app.canvas.vp.list.underlays.clone();
+        let outline = f.outline.as_ref().and_then(|o| {
+            let (k, b) = app.canvas.vp.motion.unwrap_or((1.0, Vec2::ZERO));
+            let pts: Vec<Vec2> = o.iter().map(|q| (*q - b) / k).collect();
+            cadcraft_render::clip::PolyClip::new(&pts)
+        });
+        let pages = underlay::shapes(app, &clipped, &f.xf, &lus, outline.as_ref(), bg);
+        draw_vp_content(&mut app.canvas.vp, gpu, &clipped, &f, &xf_paper, pages, bg, app.session.settings.lwdisplay);
         masked = gpu && f.outline.is_some();
     }
+    // PDF underlays' pages, each at its place in the drawing order.
+    let lus = app.canvas.list.as_ref().map(|l| l.underlays.clone()).unwrap_or_default();
+    let pages = underlay::shapes(app, &painter, &xf_paper, &lus, None, bg);
     if app.canvas.gpu.is_some() {
-        draw_list_gpu(&mut app.canvas, &painter, &xf_paper, bg, app.session.settings.lwdisplay);
+        draw_list_gpu(&mut app.canvas, &painter, &xf_paper, pages, bg, app.session.settings.lwdisplay);
     } else if let Some(list) = &app.canvas.list {
-        draw_list(&painter, &xf_paper, list, bg, app.session.settings.lwdisplay);
+        draw_list_with_pages(&painter, &xf_paper, list, pages, bg, app.session.settings.lwdisplay);
     }
     if let Some(vp) = &active_vp {
         // The active viewport: a heavy border, highlights in model units clipped to it.
@@ -2947,6 +3022,9 @@ mod compare;
 
 /// Background rebuilds of the display list for a new view.
 mod rebuild;
+
+/// PDF underlays' pages under the drawing.
+mod underlay;
 
 #[cfg(test)]
 mod hatch_pick_tests {
