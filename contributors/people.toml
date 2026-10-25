@@ -91,3 +91,6 @@ sync_github_name = false
 real_name = "Robert Lee"
 sync_github_name = true
 
+[people.ATARYS-LAB]
+display_name = "Julien - ATARYS"
+sync_github_name = false
