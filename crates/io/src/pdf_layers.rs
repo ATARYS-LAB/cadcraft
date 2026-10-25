@@ -6,12 +6,14 @@
 //! failure is an error, never a panic.
 
 use hayro::hayro_syntax::Pdf;
-use hayro::hayro_syntax::object::{Array, Dict, Name, ObjRef, ObjectIdentifier};
+use hayro::hayro_syntax::object::{Array, Dict, Name, ObjRef, Object, ObjectIdentifier};
 
 use crate::{IoError, Result};
 
 /// Most layers read from one PDF.
 const MAX_LAYERS: usize = 4096;
+/// Most object numbers tried for the new catalog past the first free-looking one.
+const MAX_NUMBER_PROBES: u64 = 100_000;
 
 /// One layer of a PDF: its name and whether the PDF shows it by default.
 #[derive(Clone, Debug, PartialEq)]
@@ -90,6 +92,18 @@ fn last_number(bytes: &[u8], key: &[u8]) -> Option<u64> {
     std::str::from_utf8(&digits).ok()?.parse().ok()
 }
 
+/// A number for one new object of the PDF `bytes`: from its trailer's size (read from the raw
+/// bytes, which may name the size of an older section or match bytes inside a stream) or its
+/// count of objects, whichever is larger, then past any number the PDF already uses.
+fn new_object_number(pdf: &Pdf, bytes: &[u8]) -> Result<u64> {
+    let start = last_number(bytes, b"/Size").unwrap_or(0).max(pdf.len() as u64).max(1);
+    let in_use = |n: u64| {
+        let Ok(n) = i32::try_from(n) else { return true };
+        (0..4).any(|g| pdf.xref().get::<Object<'_>>(ObjectIdentifier::new(n, g)).is_some())
+    };
+    (start..start.saturating_add(MAX_NUMBER_PROBES)).find(|n| !in_use(*n)).ok_or_else(|| IoError::Format("the PDF has no free object number".into()))
+}
+
 /// The PDF `bytes` with each layer named in `visible` turned on or off (layers not named keep
 /// the PDF's default). The bytes come back unchanged when nothing changes.
 pub fn with_layers(bytes: &[u8], visible: &[(String, bool)]) -> Result<Vec<u8>> {
@@ -102,7 +116,7 @@ pub fn with_layers(bytes: &[u8], visible: &[(String, bool)]) -> Result<Vec<u8>> 
     if l.groups.iter().all(|(_, layer)| shown(layer) == layer.on) {
         return Ok(bytes.to_vec());
     }
-    let size = last_number(bytes, b"/Size").ok_or_else(|| IoError::Format("the PDF has no trailer size".into()))?;
+    let size = new_object_number(&pdf, bytes)?;
     let prev = last_number(bytes, b"startxref").ok_or_else(|| IoError::Format("the PDF has no cross-reference".into()))?;
     let r = |o: &ObjRef| format!("{} {} R", o.obj_number, o.gen_number);
     let all: Vec<String> = l.groups.iter().map(|(o, _)| r(o)).collect();
@@ -177,6 +191,47 @@ mod tests {
         assert!(colours(&on).1 > 50);
         // Nothing to change: the same bytes.
         assert_eq!(with_layers(&pdf, &[("COTES".into(), true), ("NOPE".into(), false)]).unwrap(), pdf);
+    }
+
+    /// A one-page PDF with layers MURS and COTES whose trailer understates its size (`/Size 3`
+    /// for objects 1 to 5), as some writers do.
+    fn understated_size_pdf() -> Vec<u8> {
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [4 0 R 5 0 R] /D << /Order [4 0 R 5 0 R] >> >> >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>",
+            "<< /Type /OCG /Name (MURS) >>",
+            "<< /Type /OCG /Name (COTES) >>",
+        ];
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut at = Vec::new();
+        for (i, o) in objects.iter().enumerate() {
+            at.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = out.len();
+        out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+        for a in at {
+            out.extend_from_slice(format!("{a:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(format!("trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+        out
+    }
+
+    #[test]
+    fn the_new_catalog_takes_a_number_no_object_uses() {
+        let pdf = understated_size_pdf();
+        assert_eq!(layers(&pdf).unwrap().len(), 2);
+        let off = with_layers(&pdf, &[("COTES".into(), false)]).unwrap();
+        // The catalog went past object 5 instead of replacing the page (object 3).
+        let update = String::from_utf8_lossy(off.get(pdf.len()..).unwrap_or_default()).into_owned();
+        assert!(update.contains("6 0 obj") && !update.contains("\n3 0 obj"), "{update}");
+        let pdf_file = crate::pdf_read::PdfFile::open(&off).unwrap();
+        assert_eq!(pdf_file.page_count(), 1);
+        let (w, h) = pdf_file.page_size_mm(1).unwrap();
+        assert!((w - 209.9).abs() < 0.5 && (h - 297.0).abs() < 0.5, "the page keeps its size: {w} × {h}");
+        let after: Vec<(String, bool)> = layers(&off).unwrap().into_iter().map(|l| (l.name, l.on)).collect();
+        assert_eq!(after, vec![("MURS".into(), true), ("COTES".into(), false)]);
     }
 
     #[test]

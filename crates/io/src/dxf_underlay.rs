@@ -129,25 +129,36 @@ pub(crate) fn resolve(secs: &[Section], d: &mut Drawing) {
     if by_underlay.is_empty() {
         return;
     }
-    fill(&mut d.model, &by_underlay);
+    // Aggregate budget on the definition paths copied into referring underlays, so a long path
+    // referenced many times can't grow into gigabytes (as for images, CWE-400).
+    let mut budget = MAX_RESOLVED_PATH_BYTES;
+    fill(&mut d.model, &by_underlay, &mut budget);
     for l in &mut d.layouts {
-        fill(&mut l.entities, &by_underlay);
+        fill(&mut l.entities, &by_underlay, &mut budget);
     }
     for b in d.blocks.values_mut() {
         if b.entities.iter().any(|e| by_underlay.contains_key(&e.handle)) {
-            fill(&mut Arc::make_mut(b).entities, &by_underlay);
+            fill(&mut Arc::make_mut(b).entities, &by_underlay, &mut budget);
         }
     }
 }
 
-fn fill(store: &mut EntityStore, by_underlay: &HashMap<Handle, &(String, u32, bool)>) {
+/// Most bytes of definition paths copied into a drawing's underlays.
+const MAX_RESOLVED_PATH_BYTES: usize = 64 << 20;
+
+/// Give the underlays of `store` their definition's file, page and state. Once `budget` is spent
+/// the paths are no longer copied; the page and state still are.
+fn fill(store: &mut EntityStore, by_underlay: &HashMap<Handle, &(String, u32, bool)>, budget: &mut usize) {
     let hs: Vec<Handle> =
         store.iter().filter(|e| matches!(e.kind, EntityKind::PdfUnderlay(_)) && by_underlay.contains_key(&e.handle)).map(|e| e.handle).collect();
     for h in hs {
         let Some((path, page, unloaded)) = by_underlay.get(&h) else { continue };
+        let copy_path = budget.checked_sub(path.len()).map(|left| *budget = left).is_some();
         store.modify(h, |e| {
             if let EntityKind::PdfUnderlay(u) = &mut e.kind {
-                u.path = path.clone();
+                if copy_path {
+                    u.path = path.clone();
+                }
                 u.page = *page;
                 u.unloaded = *unloaded;
             }
@@ -194,6 +205,8 @@ pub(crate) fn plan<'a>(entities: impl Iterator<Item = &'a cadcraft_doc::Entity>,
     let mut p = Plan::default();
     let mut index: HashMap<(String, u32), usize> = HashMap::new();
     let mut used: HashSet<String> = HashSet::new();
+    // The next suffix to try per name, so many files of one name aren't probed from 2 each time.
+    let mut suffix: HashMap<String, usize> = HashMap::new();
     for e in entities {
         let EntityKind::PdfUnderlay(u) = &e.kind else { continue };
         if p.by_entity.contains_key(&e.handle) {
@@ -206,10 +219,10 @@ pub(crate) fn plan<'a>(entities: impl Iterator<Item = &'a cadcraft_doc::Entity>,
                 // Dictionary keys are unique regardless of case.
                 let base = def_name(u);
                 let mut name = base.clone();
-                let mut n = 2usize;
+                let n = suffix.entry(key(&base)).or_insert(2);
                 while !used.insert(key(&name)) {
                     name = format!("{base}_{n}");
-                    n = n.saturating_add(1);
+                    *n = n.saturating_add(1);
                 }
                 p.defs.push(PlannedDef { handle: next(), name, path: u.path.clone(), page: u.page.max(1), unloaded: false });
                 let at = p.defs.len().saturating_sub(1);
@@ -478,6 +491,22 @@ mod tests {
         assert_eq!(flags(&new), Some(11));
         assert_eq!(flags(&PdfUnderlay { clipping: false, ..new }), Some(10));
         assert!(!read_entity(&[Tag::i(280, 10)]).clipping && read_entity(&[Tag::i(280, 11)]).clipping);
+    }
+
+    #[test]
+    fn a_long_path_shared_by_many_underlays_is_copied_within_a_budget() {
+        let mut d = Drawing::new_metric();
+        let path = format!("/{}.pdf", "p".repeat(1 << 20));
+        for i in 0..100 {
+            let u = PdfUnderlay { insert: Vec3::new(f64::from(i), 0.0, 0.0), path: path.clone(), page: 2, ..PdfUnderlay::default() };
+            d.add(&Space::Model, Common::default(), EntityKind::PdfUnderlay(u)).ok();
+        }
+        let bytes = crate::write(&d, "plan.dxf").unwrap();
+        let back = underlays(&crate::read(&bytes, "plan.dxf").unwrap());
+        assert_eq!(back.len(), 100);
+        assert!(back.iter().map(|u| u.path.len()).sum::<usize>() <= MAX_RESOLVED_PATH_BYTES);
+        assert!(back.first().is_some_and(|u| u.path == path), "the first ones keep their path");
+        assert!(back.iter().all(|u| u.page == 2), "every underlay keeps its page");
     }
 
     #[test]

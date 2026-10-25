@@ -136,6 +136,62 @@ struct Lines {
     size: (f64, f64),
 }
 
+impl Lines {
+    /// Add `path` (device space) as polylines in page fractions, keeping at most `cap` points in
+    /// all: a hostile path with a huge number of segments stops there.
+    fn add(&mut self, path: &kurbo::BezPath, cap: usize) {
+        use kurbo::PathEl;
+        let room = cap.saturating_sub(self.points);
+        if room == 0 {
+            return;
+        }
+        let (w, h) = self.size;
+        let mut current: Vec<(f64, f64)> = Vec::new();
+        let mut start: Option<(f64, f64)> = None;
+        // Points kept by this path so far.
+        let mut used = 0usize;
+        let out = &mut self.out;
+        let mut flush = |line: &mut Vec<(f64, f64)>, used: &mut usize| {
+            if line.len() >= 2 {
+                *used = used.saturating_add(line.len());
+                out.push(std::mem::take(line));
+            } else {
+                line.clear();
+            }
+        };
+        kurbo::flatten(path.iter(), 0.1, |el| {
+            let to = |p: kurbo::Point| (p.x / w, 1.0 - p.y / h);
+            let full = |current: &Vec<(f64, f64)>, used: usize| used.saturating_add(current.len()) >= room;
+            match el {
+                PathEl::MoveTo(p) => {
+                    flush(&mut current, &mut used);
+                    let q = to(p);
+                    start = Some(q);
+                    if !full(&current, used) {
+                        current.push(q);
+                    }
+                }
+                PathEl::LineTo(p) => {
+                    if !full(&current, used) {
+                        current.push(to(p));
+                    }
+                }
+                PathEl::ClosePath => {
+                    if let Some(s) = start
+                        && !full(&current, used)
+                    {
+                        current.push(s);
+                    }
+                    flush(&mut current, &mut used);
+                }
+                _ => {}
+            }
+        });
+        flush(&mut current, &mut used);
+        self.points = self.points.saturating_add(used);
+    }
+}
+
 impl<'a> hayro::hayro_interpret::Device<'a> for Lines {
     fn set_soft_mask(&mut self, _: Option<hayro::hayro_interpret::SoftMask<'a>>) {}
     fn set_blend_mode(&mut self, _: hayro::hayro_interpret::BlendMode) {}
@@ -146,44 +202,7 @@ impl<'a> hayro::hayro_interpret::Device<'a> for Lines {
         _: &hayro::hayro_interpret::Paint<'a>,
         _: &hayro::hayro_interpret::PathDrawMode,
     ) {
-        use kurbo::PathEl;
-        if self.points >= MAX_LINE_POINTS {
-            return;
-        }
-        let (w, h) = self.size;
-        let mut current: Vec<(f64, f64)> = Vec::new();
-        let mut start: Option<(f64, f64)> = None;
-        let out = &mut self.out;
-        let points = &mut self.points;
-        let mut flush = |line: &mut Vec<(f64, f64)>| {
-            if line.len() >= 2 && *points < MAX_LINE_POINTS {
-                *points = points.saturating_add(line.len());
-                out.push(std::mem::take(line));
-            } else {
-                line.clear();
-            }
-        };
-        let path = transform * path.clone();
-        kurbo::flatten(path.iter(), 0.1, |el| {
-            let to = |p: kurbo::Point| (p.x / w, 1.0 - p.y / h);
-            match el {
-                PathEl::MoveTo(p) => {
-                    flush(&mut current);
-                    let q = to(p);
-                    start = Some(q);
-                    current.push(q);
-                }
-                PathEl::LineTo(p) => current.push(to(p)),
-                PathEl::ClosePath => {
-                    if let Some(s) = start {
-                        current.push(s);
-                    }
-                    flush(&mut current);
-                }
-                _ => {}
-            }
-        });
-        flush(&mut current);
+        self.add(&(transform * path.clone()), MAX_LINE_POINTS);
     }
     fn push_clip_path(&mut self, _: &hayro::hayro_interpret::ClipPath) {}
     fn push_transparency_group(&mut self, _: f32, _: Option<hayro::hayro_interpret::SoftMask<'a>>, _: hayro::hayro_interpret::BlendMode) {}
@@ -334,6 +353,25 @@ fn guarded<T>(f: impl FnOnce() -> T) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_hostile_path_keeps_no_more_points_than_the_cap() {
+        let mut path = kurbo::BezPath::new();
+        path.move_to((0.0, 0.0));
+        for i in 0..1000 {
+            path.line_to((f64::from(i), f64::from(i % 2)));
+        }
+        path.close_path();
+        path.move_to((5.0, 5.0));
+        path.line_to((6.0, 6.0));
+        let mut sink = Lines { out: Vec::new(), points: 0, size: (100.0, 100.0) };
+        sink.add(&path, 100);
+        let kept: usize = sink.out.iter().map(Vec::len).sum();
+        assert!(kept <= 100 && sink.points == kept, "{kept} points kept, {} counted", sink.points);
+        // Full: later paths add nothing.
+        sink.add(&path, 100);
+        assert_eq!(sink.out.iter().map(Vec::len).sum::<usize>(), kept);
+    }
     use cadcraft_doc::{Common, Drawing, EntityKind, Line, Lineweight, Space};
     use cadcraft_geom::Vec3;
 
