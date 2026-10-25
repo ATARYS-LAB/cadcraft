@@ -4,8 +4,9 @@
 //! on screen afterwards. Calls with parameters never open it.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
-use cadcraft_engine::cmd::underlay::{AttachPreset, pdf_pages, start_attach, stored_path, underlay_file, underlay_pixels};
+use cadcraft_engine::cmd::underlay::{AttachPreset, pdf, read_pdf, start_attach, stored_path, underlay_file};
 use cadcraft_geom::Vec2;
 use egui::{TextureHandle, TextureOptions, vec2};
 
@@ -19,6 +20,8 @@ const MAX_THUMBS: u32 = 60;
 #[derive(Clone)]
 struct State {
     path: String,
+    /// The file's bytes, read once for the page count and every thumbnail (empty if unreadable).
+    bytes: Arc<Vec<u8>>,
     pages: Result<usize, String>,
     selected: BTreeSet<u32>,
     thumbs: BTreeMap<u32, Option<TextureHandle>>,
@@ -33,9 +36,18 @@ struct State {
 
 impl State {
     fn new(path: String) -> State {
-        let pages = pdf_pages(&path).map_err(|e| e.to_string());
+        let read = pdf().ok_or_else(|| "PDF underlays are not available in this build".to_string()).and_then(|hooks| {
+            let bytes = read_pdf(&path).map_err(|e| e.to_string())?;
+            let pages = (hooks.page)(&bytes, 1).map(|(n, ..)| n).map_err(|e| format!("{path}: {e}"))?;
+            Ok((bytes, pages))
+        });
+        let (bytes, pages) = match read {
+            Ok((bytes, n)) => (bytes, Ok(n)),
+            Err(e) => (Vec::new(), Err(e)),
+        };
         State {
             path,
+            bytes: Arc::new(bytes),
             pages,
             selected: BTreeSet::from([1]),
             thumbs: BTreeMap::new(),
@@ -56,13 +68,14 @@ fn id() -> egui::Id {
 
 /// The dialog, opened as `pdfattach:<path>` on the PDF the user chose.
 pub fn dialog(app: &mut CadApp, ctx: &egui::Context, chosen: &str, open: &mut bool) {
-    let mut st = ctx.data(|d| d.get_temp::<State>(id())).unwrap_or_else(|| State::new(chosen.to_string()));
+    // The state kept from the last frame, if it is this file's (a new PDFATTACH starts afresh).
+    let mut st = ctx.data(|d| d.get_temp::<State>(id())).filter(|s| s.path == chosen).unwrap_or_else(|| State::new(chosen.to_string()));
     let document = app.session.state().ok().and_then(|s| s.path.clone());
     // One thumbnail drawn per frame, so the dialog shows at once and fills in.
     if let Ok(n) = st.pages {
         let missing = (1..=(n as u32).min(MAX_THUMBS)).find(|p| !st.thumbs.contains_key(p));
         if let Some(p) = missing {
-            let tex = underlay_pixels(&st.path, None, p, THUMB_PX, &[]).ok().and_then(|(w, h, mut rgba)| {
+            let tex = pdf().and_then(|hooks| (hooks.render)(&st.bytes, p, THUMB_PX).ok()).and_then(|(w, h, mut rgba)| {
                 // On white: the page's paper is transparent.
                 for [r, g, b, a] in rgba.as_chunks_mut::<4>().0 {
                     let k = f32::from(*a) / 255.0;
@@ -191,6 +204,8 @@ pub fn dialog(app: &mut CadApp, ctx: &egui::Context, chosen: &str, open: &mut bo
         && let Some(pick) = app.services.pick_pdf.as_ref()
         && let Some(path) = pick()
     {
+        // The dialog now shows that file (its state is kept under the new file's name).
+        app.ui.dialog = Some(format!("pdfattach:{path}"));
         st = State::new(path);
     }
     if ok {
@@ -206,10 +221,37 @@ pub fn dialog(app: &mut CadApp, ctx: &egui::Context, chosen: &str, open: &mut bo
             app.session.echo(e.to_string());
         }
     }
-    if ok || cancel {
+    // Closed by OK, Cancel, Escape or the title bar's close button: its state goes with it.
+    if ok || cancel || !*open {
         *open = false;
         ctx.data_mut(|d| d.remove::<State>(id()));
     } else {
         ctx.data_mut(|d| d.insert_temp(id(), st));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Services;
+    use cadcraft_engine::Session;
+
+    /// One frame of the dialog on `chosen`, `open` as the window's close button leaves it; the
+    /// file kept in its state afterwards.
+    fn frame(app: &mut CadApp, ctx: &egui::Context, chosen: &str, mut open: bool) -> Option<String> {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| dialog(app, ui.ctx(), chosen, &mut open));
+        output.textures_delta.clear();
+        ctx.data(|d| d.get_temp::<State>(id())).map(|s| s.path)
+    }
+
+    #[test]
+    fn a_closed_dialog_forgets_its_file_and_a_new_pick_starts_afresh() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        let ctx = egui::Context::default();
+        assert_eq!(frame(&mut app, &ctx, "/plans/a.pdf", true).as_deref(), Some("/plans/a.pdf"));
+        // Another PDFATTACH on another file while a's state is kept: b is shown.
+        assert_eq!(frame(&mut app, &ctx, "/plans/b.pdf", true).as_deref(), Some("/plans/b.pdf"));
+        // The title bar's close button: nothing kept for the next PDFATTACH.
+        assert_eq!(frame(&mut app, &ctx, "/plans/b.pdf", false), None);
     }
 }

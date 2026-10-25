@@ -31,6 +31,9 @@ const MAX_PAGES: usize = 16;
 const DETAIL_PX: u32 = 4096;
 /// Seconds the view stays still before the visible part is drawn sharper.
 const SETTLE_S: f64 = 0.25;
+/// Seconds a sharper part is kept once no underlay drawn shows it (scrolled away, deleted,
+/// another drawing): each can hold a texture of up to `DETAIL_PX` squared pixels.
+const DETAIL_KEEP_S: f64 = 5.0;
 
 type Pixels = Result<(u32, u32, Vec<u8>), String>;
 
@@ -50,14 +53,15 @@ fn shade((turned, contrast, monochrome): Look, rgba: &mut [u8]) {
     }
 }
 
-/// A sharper part of one underlay's page: the part (page fractions `[left, bottom, right,
-/// top]`), the screen pixels per page width it was drawn for, and its texture or the pending
-/// result.
+/// A sharper part of one underlay's page: the part shown (page fractions `[left, bottom, right,
+/// top]`), the screen pixels per page width it was drawn for, its texture, the part being drawn
+/// (its pixels to come, part and density), and when (egui time) it was last drawn on screen.
 struct Detail {
     region: [f64; 4],
     density: f64,
     shown: Option<TextureHandle>,
-    pending: Option<std::sync::mpsc::Receiver<Pixels>>,
+    pending: Option<(std::sync::mpsc::Receiver<Pixels>, [f64; 4], f64)>,
+    used: f64,
 }
 
 /// Pages already read, by drawing and stored file, page number and how they are shown; a page that could not be read is kept as its
@@ -199,6 +203,8 @@ pub(crate) fn shapes(
         }
     };
     let ppp = f64::from(ctx.pixels_per_point());
+    // A page wants a sharper part: one more frame once the view has settled draws it.
+    let mut want_sharp = false;
     for it in &items {
         let Ok(tex) = cache.texture(&ctx, &it.path, document.as_deref(), it.page, it.look, &it.layers) else { continue };
         let base = (tex.id(), f64::from(tex.size()[0].max(1) as u32));
@@ -210,7 +216,8 @@ pub(crate) fn shapes(
         let mut sharp = None;
         if redrawn(density, base.1) {
             if let Some(region) = visible_region(it, &view, 0.25) {
-                cache.detail(&ctx, &key, it, document.as_deref(), region, density, settled);
+                want_sharp = true;
+                cache.detail(&ctx, &key, it, document.as_deref(), region, density, settled, now);
             }
             // The sharper part replaces the whole page while it covers the view.
             if let (Some(d), Some(seen)) = (cache.details.get(&key), visible_region(it, &view, 0.0))
@@ -228,9 +235,12 @@ pub(crate) fn shapes(
         let (texture, region) = sharp.unwrap_or((base.0, [0.0, 0.0, 1.0, 1.0]));
         out.push((it.index, Shape::mesh(mesh(texture, it, region, xf, tint))));
     }
-    if !settled && cache.details.values().any(|d| d.shown.is_some() || d.pending.is_some()) {
+    if !settled && (want_sharp || cache.details.values().any(|d| d.shown.is_some() || d.pending.is_some())) {
         ctx.request_repaint_after(std::time::Duration::from_secs_f64(SETTLE_S));
     }
+    // Not by the keys drawn in this call: the viewports' pages and the main list's are drawn in
+    // two calls a frame, which would drop each other's.
+    cache.forget_details(now);
     out
 }
 
@@ -261,8 +271,14 @@ fn visible_region(it: &Item, view: &Bounds2, margin: f64) -> Option<[f64; 4]> {
 }
 
 impl Cache {
+    /// Drop the sharper parts not drawn for [`DETAIL_KEEP_S`] seconds at egui time `now`.
+    fn forget_details(&mut self, now: f64) {
+        self.details.retain(|_, d| now - d.used < DETAIL_KEEP_S);
+    }
+
     /// Keep the sharper part of `it` up to date: when the view has settled and the part shown
     /// doesn't cover `want` at about `density`, draw it again.
+    #[allow(clippy::too_many_arguments)]
     fn detail(
         &mut self,
         ctx: &egui::Context,
@@ -272,18 +288,22 @@ impl Cache {
         want: [f64; 4],
         density: f64,
         settled: bool,
+        now: f64,
     ) {
-        let d = self.details.entry(key.clone()).or_insert(Detail { region: want, density: 0.0, shown: None, pending: None });
-        if let Some(rx) = &d.pending {
+        let d = self.details.entry(key.clone()).or_insert(Detail { region: want, density: 0.0, shown: None, pending: None, used: now });
+        d.used = now;
+        if let Some((rx, region, drawn_at)) = &d.pending {
             match rx.try_recv() {
                 Ok(Ok((w, h, mut rgba))) => {
-                    d.pending = None;
                     shade(it.look, &mut rgba);
                     let size = [w as usize, h as usize];
+                    // The part and density go with the texture drawn for them.
                     if size[0].checked_mul(size[1]).and_then(|n| n.checked_mul(4)) == Some(rgba.len()) {
                         let image = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
                         d.shown = Some(ctx.load_texture(format!("pdf-underlay-detail {}", it.path), image, TextureOptions::LINEAR));
+                        (d.region, d.density) = (*region, *drawn_at);
                     }
+                    d.pending = None;
                 }
                 Ok(Err(e)) => {
                     d.pending = None;
@@ -310,8 +330,6 @@ impl Cache {
         let k = (f64::from(DETAIL_PX) / w.max(h)).min(1.0);
         w = (w * k).round().max(1.0);
         h = (h * k).round().max(1.0);
-        d.region = want;
-        d.density = density;
         let (path, doc, page, layers) = (it.path.clone(), document.map(str::to_string), it.page, it.layers.clone());
         let (tx, rx) = std::sync::mpsc::channel::<Pixels>();
         let job = move || {
@@ -325,7 +343,7 @@ impl Cache {
         }
         #[cfg(target_arch = "wasm32")]
         job();
-        d.pending = Some(rx);
+        d.pending = Some((rx, want, density));
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
 }
@@ -347,7 +365,52 @@ fn mesh(texture: egui::TextureId, it: &Item, [l, b, r, t]: [f64; 4], xf: &Xf, co
 
 #[cfg(test)]
 mod tests {
-    use super::redrawn;
+    use super::*;
+
+    fn item() -> Item {
+        Item {
+            index: 0,
+            handle: Handle(1),
+            path: "plan.pdf".into(),
+            page: 1,
+            look: (false, 0, false),
+            layers: Vec::new(),
+            fade: 0.0,
+            origin: Vec2::ZERO,
+            axes: (Vec2::new(297.0, 0.0), Vec2::new(0.0, 210.0)),
+            tris: Vec::new(),
+            shown: [0.0, 0.0, 1.0, 1.0],
+        }
+    }
+
+    fn texture(ctx: &egui::Context) -> TextureHandle {
+        ctx.load_texture("t", egui::ColorImage::from_rgba_unmultiplied([1, 1], &[0, 0, 0, 255]), TextureOptions::LINEAR)
+    }
+
+    #[test]
+    fn a_part_being_drawn_leaves_the_part_shown_with_its_own_region() {
+        let ctx = egui::Context::default();
+        let mut cache = Cache::default();
+        let key = (Handle(1), 0, "plan.pdf".to_string(), 1, (false, 0, false));
+        let old = [0.0, 0.0, 0.2, 0.2];
+        cache.details.insert(key.clone(), Detail { region: old, density: 1000.0, shown: Some(texture(&ctx)), pending: None, used: 0.0 });
+        // Panned to another part: a new part is asked for.
+        cache.detail(&ctx, &key, &item(), None, [0.6, 0.6, 0.8, 0.8], 1000.0, true, 1.0);
+        let d = cache.details.get(&key).unwrap();
+        assert!(d.pending.is_some(), "the new part is being drawn");
+        assert_eq!(d.region, old, "the texture shown keeps the region it was drawn for");
+    }
+
+    #[test]
+    fn sharper_parts_not_drawn_for_a_while_are_dropped() {
+        let ctx = egui::Context::default();
+        let mut cache = Cache::default();
+        let detail = |used| Detail { region: [0.0, 0.0, 1.0, 1.0], density: 1.0, shown: Some(texture(&ctx)), pending: None, used };
+        cache.details.insert((Handle(1), 0, String::new(), 1, (false, 0, false)), detail(0.0));
+        cache.details.insert((Handle(2), 0, String::new(), 1, (false, 0, false)), detail(9.0));
+        cache.forget_details(10.0);
+        assert_eq!(cache.details.keys().map(|k| k.0).collect::<Vec<_>>(), vec![Handle(2)]);
+    }
 
     #[test]
     fn a_page_far_from_its_texture_size_is_drawn_again_at_the_screen_s() {
