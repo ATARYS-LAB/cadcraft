@@ -295,7 +295,13 @@ pub(crate) fn objects(p: &Plan, root: &str) -> Vec<Tag> {
         t.extend([Tag::s(3, &d.name), Tag::s(350, &d.handle)]);
     }
     for d in &p.defs {
-        t.extend([Tag::s(0, "PDFDEFINITION"), Tag::s(5, &d.handle), Tag::s(102, "{ACAD_REACTORS"), Tag::s(330, &p.dict), Tag::s(102, "}")]);
+        // Its reactors: the dictionary, then the underlays using it (AutoCAD lists a PDF whose
+        // definition names none as unreferenced).
+        t.extend([Tag::s(0, "PDFDEFINITION"), Tag::s(5, &d.handle), Tag::s(102, "{ACAD_REACTORS"), Tag::s(330, &p.dict)]);
+        let mut users: Vec<Handle> = p.by_entity.iter().filter(|(_, def)| **def == d.handle).map(|(h, _)| *h).collect();
+        users.sort_unstable();
+        t.extend(users.iter().map(|h| Tag::s(330, h.hex())));
+        t.push(Tag::s(102, "}"));
         t.extend([Tag::s(330, &p.dict), Tag::s(100, "AcDbUnderlayDefinition"), Tag::s(1, &d.path), Tag::s(2, d.page.to_string())]);
         if d.unloaded {
             t.extend([Tag::s(1001, "ACAD"), Tag::s(1000, "NOLOAD")]);
@@ -411,6 +417,35 @@ mod tests {
         // On the unloaded file's definition: 1001 ACAD, 1000 NOLOAD.
         assert!(pairs.windows(2).any(|w| w == [("1001", "ACAD"), ("1000", "NOLOAD")]));
         assert!(pairs.contains(&("2", LAYERS_APP)), "the application is registered");
+    }
+
+    /// AutoCAD's External References palette lists a PDF whose definition names no underlay as
+    /// unreferenced: each PDFDEFINITION's reactors are its dictionary, then the underlays using it.
+    #[test]
+    fn each_definition_lists_the_underlays_using_it_as_reactors() {
+        let bytes = crate::write(&drawing(), "plan.dxf").unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+        let pairs: Vec<(&str, &str)> = lines.as_chunks::<2>().0.iter().map(|[a, b]| (*a, *b)).collect();
+        // Each object's pairs, from its 0 group to the next.
+        let objects: Vec<&[(&str, &str)]> = pairs.split_inclusive(|p| p.0 == "0").collect();
+        let starting = |kind: &str| -> Vec<&[(&str, &str)]> {
+            (1..objects.len()).filter(|i| objects[i - 1].last() == Some(&("0", kind))).map(|i| objects[i]).collect()
+        };
+        let value = |o: &[(&str, &str)], code: &str| o.iter().find(|p| p.0 == code).map(|p| p.1.to_string()).unwrap();
+        let underlays: Vec<(String, String)> = starting("PDFUNDERLAY").iter().map(|o| (value(o, "5"), value(o, "340"))).collect();
+        assert_eq!(underlays.len(), 3);
+        let defs = starting("PDFDEFINITION");
+        assert_eq!(defs.len(), 2);
+        for o in defs {
+            let def = value(o, "5");
+            let at = o.iter().position(|p| *p == ("102", "{ACAD_REACTORS")).unwrap();
+            let end = o.iter().position(|p| *p == ("102", "}")).unwrap();
+            let reactors: Vec<String> = o[at + 1..end].iter().map(|p| p.1.to_string()).collect();
+            let mut want = vec![value(o, "330")];
+            want.extend(underlays.iter().filter(|(_, d)| *d == def).map(|(h, _)| h.clone()));
+            assert_eq!(reactors, want, "definition {def}");
+        }
     }
 
     #[test]
