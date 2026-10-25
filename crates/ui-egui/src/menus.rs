@@ -778,9 +778,9 @@ mod tests {
         let (mods, key) = s.rsplit_once('+').unwrap_or(("", s));
         for part in mods.split('+').filter(|p| !p.is_empty()) {
             match part {
-                "Cmd" => m = m | egui::Modifiers::COMMAND,
-                "Shift" => m = m | egui::Modifiers::SHIFT,
-                "Alt" => m = m | egui::Modifiers::ALT,
+                "Cmd" => m |= egui::Modifiers::COMMAND,
+                "Shift" => m |= egui::Modifiers::SHIFT,
+                "Alt" => m |= egui::Modifiers::ALT,
                 _ => return None,
             }
         }
