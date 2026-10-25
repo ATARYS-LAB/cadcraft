@@ -64,11 +64,17 @@ struct Detail {
     used: f64,
 }
 
-/// Pages already read, by drawing and stored file, page number and how they are shown; a page that could not be read is kept as its
-/// error so it is not read again every frame.
+/// A page being read on a worker thread, or read: its texture, or the error, kept so it is not
+/// read again every frame.
+enum Page {
+    Reading(std::sync::mpsc::Receiver<Pixels>),
+    Read(Result<TextureHandle, String>),
+}
+
+/// Pages by drawing and stored file, page number and how they are shown.
 #[derive(Default)]
 pub(crate) struct Cache {
-    pages: HashMap<(String, u32, Look), Result<TextureHandle, String>>,
+    pages: HashMap<(String, u32, Look), Page>,
     /// Sharper parts, by underlay and its place in the list (and the file, page and look they show).
     details: HashMap<(Handle, usize, String, u32, Look), Detail>,
     /// The view last drawn and since when (egui time) it hasn't moved.
@@ -76,6 +82,9 @@ pub(crate) struct Cache {
 }
 
 impl Cache {
+    /// The page's texture once it has been read. The first call starts reading it on a worker
+    /// thread (at once on the web, which has no threads), so the canvas doesn't stop while a big
+    /// page is drawn: until then the underlay shows its frame only.
     fn texture(
         &mut self,
         ctx: &egui::Context,
@@ -92,26 +101,52 @@ impl Cache {
             if self.pages.len() >= MAX_PAGES {
                 self.pages.clear();
             }
-            let read = cadcraft_engine::cmd::underlay::underlay_pixels(path, document, page, PAGE_PX, layers).map_err(|e| e.to_string()).and_then(
-                |(w, h, mut rgba)| {
-                    shade(look, &mut rgba);
+            let (path_owned, doc, layers_owned) = (path.to_string(), document.map(str::to_string), layers.to_vec());
+            let (tx, rx) = std::sync::mpsc::channel::<Pixels>();
+            let job = move || {
+                let r = cadcraft_engine::cmd::underlay::underlay_pixels(&path_owned, doc.as_deref(), page, PAGE_PX, &layers_owned)
+                    .map_err(|e| e.to_string())
+                    .map(|(w, h, mut rgba)| {
+                        shade(look, &mut rgba);
+                        (w, h, rgba)
+                    });
+                let _ = tx.send(r);
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            let started = std::thread::Builder::new().name("cadcraft-pdf".into()).spawn(job).is_ok();
+            #[cfg(target_arch = "wasm32")]
+            let started = {
+                job();
+                true
+            };
+            let state = if started { Page::Reading(rx) } else { Page::Read(Err("the page could not be read".to_string())) };
+            self.pages.insert(key.clone(), state);
+        }
+        if let Some(Page::Reading(rx)) = self.pages.get(&key) {
+            let read = match rx.try_recv() {
+                Ok(r) => r.and_then(|(w, h, rgba)| {
                     let size = [usize::try_from(w).unwrap_or(0), usize::try_from(h).unwrap_or(0)];
                     if size[0].checked_mul(size[1]).and_then(|n| n.checked_mul(4)) != Some(rgba.len()) {
                         return Err("the page was drawn with a wrong size".to_string());
                     }
                     let image = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
                     Ok(ctx.load_texture(format!("pdf-underlay {path} {page}"), image, TextureOptions::LINEAR))
-                },
-            );
+                }),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                    return Err("being read");
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("the page could not be read".to_string()),
+            };
             if let Err(e) = &read {
                 log::warn!("PDF underlay {path} page {page}: {e}");
             }
-            self.pages.insert(key.clone(), read);
+            self.pages.insert(key.clone(), Page::Read(read));
         }
         match self.pages.get(&key) {
-            Some(Ok(t)) => Ok(t),
-            Some(Err(e)) => Err(e.as_str()),
-            None => Err("not read"),
+            Some(Page::Read(Ok(t))) => Ok(t),
+            Some(Page::Read(Err(e))) => Err(e.as_str()),
+            _ => Err("being read"),
         }
     }
 }
@@ -399,6 +434,25 @@ mod tests {
         let d = cache.details.get(&key).unwrap();
         assert!(d.pending.is_some(), "the new part is being drawn");
         assert_eq!(d.region, old, "the texture shown keeps the region it was drawn for");
+    }
+
+    #[test]
+    fn a_page_is_read_on_a_worker_and_the_canvas_does_not_wait_for_it() {
+        let ctx = egui::Context::default();
+        let mut cache = Cache::default();
+        let look = (false, 100, false);
+        // The first frame starts the reading and goes on without the page.
+        assert_eq!(cache.texture(&ctx, "/nowhere/plan.pdf", None, 1, look, &[]).err(), Some("being read"));
+        // A later frame gets what the worker read (here an error: this test has no PDF reader).
+        let mut got = Err("being read".to_string());
+        for _ in 0..200 {
+            got = cache.texture(&ctx, "/nowhere/plan.pdf", None, 1, look, &[]).map(|_| ()).map_err(str::to_string);
+            if got.as_ref().err().is_none_or(|e| e != "being read") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(got.is_err_and(|e| e != "being read"), "the reading ended");
     }
 
     #[test]
