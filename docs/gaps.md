@@ -1,6 +1,6 @@
 # Where CADCraft falls short of AutoCAD
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-25 · **Change:** minor (PDF underlays: PDFATTACH, PDFADJUST, display, DXF/DWG save; FF10 narrowed) · **Target:** Autodesk AutoCAD 2027
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-25 · **Change:** minor (PDF underlays: PDFCLIP, PDFFRAME, PDFOSNAP and snaps on the page's lines; FF10 narrowed) · **Target:** Autodesk AutoCAD 2027
 
 Every known shortfall, one row each, ranked within each section by user impact. This is the work
 list: agents pick from here (top of a section first), and remove or update a row in the same PR
@@ -82,7 +82,7 @@ Detail: [file-format-parity.md](file-format-parity.md).
 | FF7 | Table record and object handles from other programs' files are renumbered on the first save (entity handles are kept; `*D` blocks no longer duplicate and once reopened, CADCraft's own files keep every handle across saves, #495) | Low | 4–6 |
 | FF8 | SHX fonts (shape and big fonts) not read | Medium-high (text metrics differ) | 8–12 |
 | FF9 | `.pc3` plotter configuration files; linetype shape (SHX) elements are skipped (templates and `.dwt`, user `.lin`/`.pat` and `.pgp` alias files landed, #552; `.ctb`/`.stb`, #410) | Low-medium | 5–10 |
-| FF10 | PDF underlay leftovers (PDFATTACH, PDFADJUST, display and DXF/DWG save landed): PDFCLIP, PDFFRAME, PDFOSNAP and snaps on the page's lines, ULAYERS, the page on plots, the External References palette's PDF entries; PDF import (PDFIMPORT); raster image attach (IMAGEATTACH). PDF export has real text in embedded TrueType subsets, PDF layers, several sheets per file and hyperlinks (#567, #571) | Medium | 20–35 |
+| FF10 | PDF underlay leftovers (PDFATTACH, PDFADJUST, PDFCLIP, PDFFRAME, PDFOSNAP, display and DXF/DWG save landed): ULAYERS, the page on plots, the External References palette's PDF entries; PDF import (PDFIMPORT); raster image attach (IMAGEATTACH). PDF export has real text in embedded TrueType subsets, PDF layers, several sheets per file and hyperlinks (#567, #571) | Medium | 20–35 |
 | FF11 | DWF/DWFx, DGN, WMF, EPS, ACIS/STL and other exchange formats | Low-medium | 50–100 |
 | FF12 | DWG in the web build | Medium | 6–10 |
 | FF13 | R12 binary DXF, pre-R13 DWG | Low | 10–20 |
@@ -150,6 +150,7 @@ Detail: [localization-parity.md](localization-parity.md).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-25 | minor | PDF underlays: PDFCLIP (rectangle, polygon or polyline boundary, inverted, on/off, delete; typed and JSON) clips an underlay; PDFFRAME shows, plots or hides underlays' frames; object snaps find the lines drawn on an underlay's page (inside its clip boundary, through layout viewports and block references), switched by PDFOSNAP: FF10 narrowed |
 | 2026-10-25 | minor | PDF underlays: PDFATTACH (dialog, typed prompts and JSON form) puts PDF pages under the drawing at their size on paper, sized by a page's measuring scale as AutoCAD does; PDFADJUST sets fade, contrast, monochrome and colour adjustment; pages are drawn on screen in the draw order, through layout viewports and inside blocks, sharp when zoomed; PDFUNDERLAY and PDFDEFINITION are read and written in DXF and DWG with their clip boundary, PDF layer overrides and unloaded state: FF10 narrowed |
 | 2026-10-25 | minor | DIMTFILL limits: with DIMTFILL 1 (the drawing's background color) the written `*D` block and EXPLODE keep no background mask (a WIPEOUT over the text box would), and a true-color DIMTFILLCLR is written to DXF as the nearest ACI: F7 updated |
 | 2026-10-24 | minor | COMPAREEXPORT (typed, or Export on the comparison bar) opens the comparison as a new untitled drawing, `compare_<this> vs <other>.dwg`: this drawing's objects in one group and the other drawing's differing objects in a second group, in the comparison colors (green, red, gray for objects in both), block contents and style colors included: F22 narrowed |

@@ -112,7 +112,7 @@ on read with a note, so such files no longer exceed the DXF limit (#1482). **DWG
 | DWT templates | open, save | NEW/QNEW from `.dwt` and `.dxf` templates, SAVEAS `.dwt` (#552) | 0–1 |
 | DWS standards | open, save, CHECKSTANDARDS | no | 6–10 |
 | PDF output (PLOT, EXPORTPDF) | multi-sheet, layers, searchable text, hyperlinks | vector PDF with lineweights, real text in embedded TrueType subsets, layers (OCG), several sheets per file and hyperlinks (#567, #571); object transparency as PDF alpha when "Plot transparency" is on (the option isn't saved in DXF/DWG: no public plot layout flag) | 1–2 |
-| PDF import (PDFIMPORT) and PDF underlays (PDFATTACH) | yes | underlays: attached, adjusted, shown and saved (DXF, DWG); not plotted, no PDFCLIP/ULAYERS/snaps yet; no PDFIMPORT | 10–18 |
+| PDF import (PDFIMPORT) and PDF underlays (PDFATTACH) | yes | underlays: attached, adjusted, shown and saved (DXF, DWG); clipped (PDFCLIP), framed (PDFFRAME), snapped to (PDFOSNAP); not plotted, no ULAYERS yet; no PDFIMPORT | 10–18 |
 | Raster images attach (PNG, JPEG, TIFF, BMP …) | yes | IMAGE entity exists, no attach/loading/display path | 6–10 |
 | PNG / JPEG / BMP / TIFF export | PNGOUT, JPGOUT, BMPOUT, TIFOUT | PNG; SVG too (AutoCAD doesn't export SVG) | 1–2 |
 | DWF/DWFx export, DWF underlay | yes | no | 10–15 |
