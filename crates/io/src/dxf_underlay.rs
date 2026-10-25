@@ -166,13 +166,14 @@ fn fill(store: &mut EntityStore, by_underlay: &HashMap<Handle, &(String, u32, bo
     }
 }
 
-/// One PDFDEFINITION to write, shared by the underlays of the same file and page.
+/// One PDFDEFINITION to write, shared by the underlays of the same file, page and state.
 struct PlannedDef {
     handle: String,
     name: String,
     path: String,
     page: u32,
-    /// Unloaded (any of its underlays is: they share the file's state).
+    /// Unloaded: an underlay keeps no state of its own, so a loaded and an unloaded underlay of
+    /// one page get a definition each.
     unloaded: bool,
 }
 
@@ -203,7 +204,7 @@ fn def_name(u: &PdfUnderlay) -> String {
 /// Allocate the PDFDEFINITION and dictionary handles for every PDF underlay.
 pub(crate) fn plan<'a>(entities: impl Iterator<Item = &'a cadcraft_doc::Entity>, mut next: impl FnMut() -> String) -> Plan {
     let mut p = Plan::default();
-    let mut index: HashMap<(String, u32), usize> = HashMap::new();
+    let mut index: HashMap<(String, u32, bool), usize> = HashMap::new();
     let mut used: HashSet<String> = HashSet::new();
     // The next suffix to try per name, so many files of one name aren't probed from 2 each time.
     let mut suffix: HashMap<String, usize> = HashMap::new();
@@ -212,7 +213,7 @@ pub(crate) fn plan<'a>(entities: impl Iterator<Item = &'a cadcraft_doc::Entity>,
         if p.by_entity.contains_key(&e.handle) {
             continue;
         }
-        let k = (u.path.clone(), u.page);
+        let k = (u.path.clone(), u.page, u.unloaded);
         let at = match index.get(&k) {
             Some(&at) => at,
             None => {
@@ -224,14 +225,13 @@ pub(crate) fn plan<'a>(entities: impl Iterator<Item = &'a cadcraft_doc::Entity>,
                     name = format!("{base}_{n}");
                     *n = n.saturating_add(1);
                 }
-                p.defs.push(PlannedDef { handle: next(), name, path: u.path.clone(), page: u.page.max(1), unloaded: false });
+                p.defs.push(PlannedDef { handle: next(), name, path: u.path.clone(), page: u.page.max(1), unloaded: u.unloaded });
                 let at = p.defs.len().saturating_sub(1);
                 index.insert(k, at);
                 at
             }
         };
-        if let Some(def) = p.defs.get_mut(at) {
-            def.unloaded |= u.unloaded;
+        if let Some(def) = p.defs.get(at) {
             p.by_entity.insert(e.handle, def.handle.clone());
         }
     }
@@ -430,6 +430,27 @@ mod tests {
         // On the unloaded file's definition: 1001 ACAD, 1000 NOLOAD.
         assert!(pairs.windows(2).any(|w| w == [("1001", "ACAD"), ("1000", "NOLOAD")]));
         assert!(pairs.contains(&("2", LAYERS_APP)), "the application is registered");
+    }
+
+    /// Two underlays of one page, one of them unloaded, each come back in their own state.
+    #[test]
+    fn a_loaded_and_an_unloaded_underlay_of_one_page_keep_their_own_state() {
+        let mut d = Drawing::new_metric();
+        let one = |x: f64, unloaded: bool| PdfUnderlay {
+            insert: Vec3::new(x, 0.0, 0.0),
+            path: "/plans/RDC.pdf".into(),
+            page: 1,
+            scale: 1.0,
+            unloaded,
+            ..PdfUnderlay::default()
+        };
+        d.add(&Space::Model, Common::default(), EntityKind::PdfUnderlay(one(0.0, false))).ok();
+        d.add(&Space::Model, Common::default(), EntityKind::PdfUnderlay(one(100.0, true))).ok();
+        for name in ["plan.dxf", "plan.dwg"] {
+            let back = crate::read(&crate::write(&d, name).unwrap(), name).unwrap();
+            let state: Vec<(f64, bool)> = underlays(&back).iter().map(|u| (u.insert.x, u.unloaded)).collect();
+            assert_eq!(state, vec![(0.0, false), (100.0, true)], "{name}");
+        }
     }
 
     /// AutoCAD's External References palette lists a PDF whose definition names no underlay as

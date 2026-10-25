@@ -34,6 +34,9 @@ const SETTLE_S: f64 = 0.25;
 /// Seconds a sharper part is kept once no underlay drawn shows it (scrolled away, deleted,
 /// another drawing): each can hold a texture of up to `DETAIL_PX` squared pixels.
 const DETAIL_KEEP_S: f64 = 5.0;
+/// Seconds before a part whose drawing failed is asked for again (the view still on it): each
+/// attempt reads the whole PDF again.
+const DETAIL_RETRY_S: f64 = 5.0;
 
 type Pixels = Result<(u32, u32, Vec<u8>), String>;
 
@@ -62,6 +65,8 @@ struct Detail {
     shown: Option<TextureHandle>,
     pending: Option<(std::sync::mpsc::Receiver<Pixels>, [f64; 4], f64)>,
     used: f64,
+    /// The part and density whose drawing failed last, and when.
+    failed: Option<([f64; 4], f64, f64)>,
 }
 
 /// A page being read on a worker thread, or read: its texture, or the error, kept so it is not
@@ -325,27 +330,36 @@ impl Cache {
         settled: bool,
         now: f64,
     ) {
-        let d = self.details.entry(key.clone()).or_insert(Detail { region: want, density: 0.0, shown: None, pending: None, used: now });
+        let d = self.details.entry(key.clone()).or_insert(Detail { region: want, density: 0.0, shown: None, pending: None, used: now, failed: None });
         d.used = now;
         if let Some((rx, region, drawn_at)) = &d.pending {
-            match rx.try_recv() {
+            let (region, drawn_at) = (*region, *drawn_at);
+            let ok = match rx.try_recv() {
                 Ok(Ok((w, h, mut rgba))) => {
                     shade(it.look, &mut rgba);
                     let size = [w as usize, h as usize];
                     // The part and density go with the texture drawn for them.
-                    if size[0].checked_mul(size[1]).and_then(|n| n.checked_mul(4)) == Some(rgba.len()) {
+                    let fits = size[0].checked_mul(size[1]).and_then(|n| n.checked_mul(4)) == Some(rgba.len());
+                    if fits {
                         let image = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
                         d.shown = Some(ctx.load_texture(format!("pdf-underlay-detail {}", it.path), image, TextureOptions::LINEAR));
-                        (d.region, d.density) = (*region, *drawn_at);
+                        (d.region, d.density) = (region, drawn_at);
                     }
-                    d.pending = None;
+                    Some(fits)
                 }
                 Ok(Err(e)) => {
-                    d.pending = None;
                     log::warn!("PDF underlay {} page {}: {e}", it.path, it.page);
+                    Some(false)
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(50)),
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => d.pending = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                    None
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(false),
+            };
+            if let Some(ok) = ok {
+                d.pending = None;
+                d.failed = (!ok).then_some((region, drawn_at, now));
             }
         }
         let inner = |r: [f64; 4]| {
@@ -354,7 +368,9 @@ impl Cache {
             r[0] <= want[0] + mx + 1e-9 && r[1] <= want[1] + my + 1e-9 && r[2] >= want[2] - mx - 1e-9 && r[3] >= want[3] - my - 1e-9
         };
         let good = d.shown.is_some() && inner(d.region) && (0.7..=1.5).contains(&(density / d.density.max(1e-9)));
-        if good || !settled || d.pending.is_some() {
+        // A part that just failed isn't asked for again every frame; another part or density is.
+        let failed = d.failed.is_some_and(|(r, at, when)| r == want && at == density && now - when < DETAIL_RETRY_S);
+        if good || !settled || d.pending.is_some() || failed {
             return;
         }
         // Pixels for the part at the screen's density, the longest side at most DETAIL_PX.
@@ -428,12 +444,37 @@ mod tests {
         let mut cache = Cache::default();
         let key = (Handle(1), 0, "plan.pdf".to_string(), 1, (false, 0, false));
         let old = [0.0, 0.0, 0.2, 0.2];
-        cache.details.insert(key.clone(), Detail { region: old, density: 1000.0, shown: Some(texture(&ctx)), pending: None, used: 0.0 });
+        cache
+            .details
+            .insert(key.clone(), Detail { region: old, density: 1000.0, shown: Some(texture(&ctx)), pending: None, used: 0.0, failed: None });
         // Panned to another part: a new part is asked for.
         cache.detail(&ctx, &key, &item(), None, [0.6, 0.6, 0.8, 0.8], 1000.0, true, 1.0);
         let d = cache.details.get(&key).unwrap();
         assert!(d.pending.is_some(), "the new part is being drawn");
         assert_eq!(d.region, old, "the texture shown keeps the region it was drawn for");
+    }
+
+    #[test]
+    fn a_part_that_failed_is_not_asked_for_again_every_frame() {
+        let ctx = egui::Context::default();
+        let mut cache = Cache::default();
+        let key = (Handle(1), 0, "plan.pdf".to_string(), 1, (false, 0, false));
+        let want = [0.6, 0.6, 0.8, 0.8];
+        let (tx, rx) = std::sync::mpsc::channel::<Pixels>();
+        tx.send(Err("unreadable".into())).unwrap();
+        let pending = Some((rx, want, 1000.0));
+        cache.details.insert(key.clone(), Detail { region: want, density: 0.0, shown: None, pending, used: 0.0, failed: None });
+        // The failure arrives; the next frames, the view still on that part, ask for nothing.
+        for now in [1.0, 1.05, 3.0] {
+            cache.detail(&ctx, &key, &item(), None, want, 1000.0, true, now);
+            assert!(cache.details.get(&key).unwrap().pending.is_none(), "at {now} s");
+        }
+        // Another part is asked for at once, the failed one again after a while.
+        cache.detail(&ctx, &key, &item(), None, [0.1, 0.1, 0.3, 0.3], 1000.0, true, 3.1);
+        assert!(cache.details.get(&key).unwrap().pending.is_some(), "another part");
+        cache.details.get_mut(&key).unwrap().pending = None;
+        cache.detail(&ctx, &key, &item(), None, want, 1000.0, true, 1.0 + DETAIL_RETRY_S);
+        assert!(cache.details.get(&key).unwrap().pending.is_some(), "the failed part, later");
     }
 
     #[test]
@@ -459,7 +500,7 @@ mod tests {
     fn sharper_parts_not_drawn_for_a_while_are_dropped() {
         let ctx = egui::Context::default();
         let mut cache = Cache::default();
-        let detail = |used| Detail { region: [0.0, 0.0, 1.0, 1.0], density: 1.0, shown: Some(texture(&ctx)), pending: None, used };
+        let detail = |used| Detail { region: [0.0, 0.0, 1.0, 1.0], density: 1.0, shown: Some(texture(&ctx)), pending: None, used, failed: None };
         cache.details.insert((Handle(1), 0, String::new(), 1, (false, 0, false)), detail(0.0));
         cache.details.insert((Handle(2), 0, String::new(), 1, (false, 0, false)), detail(9.0));
         cache.forget_details(10.0);
