@@ -1,6 +1,6 @@
 # Where CADCraft falls short of AutoCAD
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-28 · **Change:** minor (PDFCLIP, PDFFRAME, PDFOSNAP and snaps on the page's lines; FF10 narrowed) · **Target:** Autodesk AutoCAD 2027
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-28 · **Change:** minor (PDF underlays: the page on PDF, PNG and SVG plots and SVG export; FF10 narrowed) · **Target:** Autodesk AutoCAD 2027
 
 Every known shortfall, one row each, ranked within each section by user impact. This is the work
 list: agents pick from here (top of a section first), and remove or update a row in the same PR
@@ -82,7 +82,7 @@ Detail: [file-format-parity.md](file-format-parity.md).
 | FF7 | Table record and object handles from other programs' files are renumbered on the first save (entity handles are kept; `*D` blocks no longer duplicate and once reopened, CADCraft's own files keep every handle across saves, #495) | Low | 4–6 |
 | FF8 | SHX fonts (shape and big fonts) not read | Medium-high (text metrics differ) | 8–12 |
 | FF9 | `.pc3` plotter configuration files; linetype shape (SHX) elements are skipped (templates and `.dwt`, user `.lin`/`.pat` and `.pgp` alias files landed, #552; `.ctb`/`.stb`, #410) | Low-medium | 5–10 |
-| FF10 | PDF underlay leftovers (PDFATTACH, PDFADJUST, PDFCLIP, PDFFRAME, PDFOSNAP, display and DXF/DWG save landed): ULAYERS, the page on plots, the External References palette's PDF entries; PDF import (PDFIMPORT); raster image attach (IMAGEATTACH). PDF export has real text in embedded TrueType subsets, PDF layers, several sheets per file and hyperlinks (#567, #571) | Medium | 20–35 |
+| FF10 | PDF underlay leftovers (PDFATTACH, PDFADJUST, PDFCLIP, PDFFRAME, PDFOSNAP, display, plots, SVG export and DXF/DWG save landed): ULAYERS, the External References palette's PDF entries; PDF import (PDFIMPORT); raster image attach (IMAGEATTACH). PDF export has real text in embedded TrueType subsets, PDF layers, several sheets per file and hyperlinks (#567, #571) | Medium | 20–35 |
 | FF11 | DWF/DWFx, DGN, WMF, EPS, ACIS/STL and other exchange formats | Low-medium | 50–100 |
 | FF12 | DWG in the web build | Medium | 6–10 |
 | FF13 | R12 binary DXF, pre-R13 DWG | Low | 10–20 |
@@ -150,6 +150,7 @@ Detail: [localization-parity.md](localization-parity.md).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-28 | minor | PDF underlays: the page is plotted (PDF, PNG, SVG) and exported to SVG, at the plot's resolution, with its fade, contrast and monochrome, transparent paper, clip boundary, hidden PDF layers, in the drawing order and through layout viewports: FF10 narrowed |
 | 2026-10-28 | minor | PDF underlays: PDFCLIP (rectangle, polygon or polyline boundary, inverted, on/off, delete; typed and JSON) clips an underlay; PDFFRAME shows, plots or hides underlays' frames; object snaps find the lines drawn on an underlay's page (inside its clip boundary, through layout viewports and block references), switched by PDFOSNAP: FF10 narrowed |
 | 2026-10-28 | minor | PDFATTACH (Insert ▸ PDF Underlay..., the PDF Underlay dialog, typed prompts and JSON form) puts PDF pages under the drawing at their size on paper, sized by a page's measuring scale, on the current layer; PDFADJUST sets fade, contrast, monochrome and colour adjustment: FF10 narrowed |
 | 2026-10-28 | minor | PDF underlays' pages are read from their PDF and shown on screen in the draw order, through layout viewports and inside blocks, sharp when zoomed; their size comes from the PDF on open: FF10 narrowed |
