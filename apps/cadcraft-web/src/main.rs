@@ -135,6 +135,7 @@ mod web {
             region: cadcraft_io::pdf_read::render_page_region,
             layers: cadcraft_io::pdf_layers::layer_list,
             with_layers: cadcraft_io::pdf_layers::apply_layers,
+            import: cadcraft_io::pdf_import::import_hook,
         });
         // `?host=parent`: a same-origin page framing CADCraft (such as a Nextcloud app) opens
         // drawings in it and stores what it saves. Otherwise there is no file system here: saved

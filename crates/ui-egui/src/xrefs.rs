@@ -1,5 +1,7 @@
 //! The External References palette: the drawing's xrefs with their status, type and path, and
-//! Attach, Reload, Unload, Detach, Bind, Path and Open. A thin view over the engine's XREF
+//! Attach, Reload, Unload, Detach, Bind, Path and Open; and the PDF files its underlays show, with
+//! Attach, Reload, Unload, Detach and Path, one row per file and page (`underlay.list`,
+//! `underlay.reload`, `underlay.unload`, `underlay.detach`, `underlay.path`). A thin view over the engine's XREF
 //! commands (`xref`, `-xref`, `xattach`, `xopen`): it reads the drawing and acts through
 //! [`CadApp::run`] / [`CadApp::start`].
 
@@ -114,6 +116,133 @@ fn rows(app: &CadApp, ui: &egui::Ui) -> Vec<Row> {
 enum Act {
     Start(&'static str),
     Run(&'static str, Value),
+    /// Read the PDFs' pages again (and show unloaded ones again), all or one file and page.
+    ReloadPdfs(Option<(String, u32)>),
+}
+
+/// One PDF file as the palette lists it.
+#[derive(Clone, Debug, PartialEq)]
+struct PdfRow {
+    name: String,
+    path: String,
+    page: u32,
+    status: String,
+    references: u64,
+}
+
+/// The PDF files the active drawing's underlays show (cached per drawing revision).
+fn pdf_rows(app: &mut CadApp, ui: &egui::Ui) -> Vec<PdfRow> {
+    let Ok(st) = app.session.state() else { return Vec::new() };
+    let key = (st.uid, st.revision);
+    let id = egui::Id::unique("xref-pdf-rows");
+    if let Some((k, rows)) = ui.data(|d| d.get_temp::<((u64, u64), Vec<PdfRow>)>(id))
+        && k == key
+    {
+        return rows;
+    }
+    let listed = app.session.execute("underlay.list", &json!({})).unwrap_or(Value::Null);
+    let rows: Vec<PdfRow> = listed["pdfs"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|p| PdfRow {
+                    name: p["name"].as_str().unwrap_or_default().to_string(),
+                    path: p["path"].as_str().unwrap_or_default().to_string(),
+                    page: p["page"].as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(1),
+                    status: p["status"].as_str().unwrap_or_default().to_string(),
+                    references: p["references"].as_u64().unwrap_or(0),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    ui.data_mut(|d| d.insert_temp(id, (key, rows.clone())));
+    rows
+}
+
+/// The PDF files: a row each, and the selected one's actions and path.
+fn pdf_section(app: &mut CadApp, ui: &mut egui::Ui, act: &mut Option<Act>) {
+    let t = crate::theme::Tokens::get();
+    let rows = pdf_rows(app, ui);
+    let sel_id = egui::Id::unique("xref-pdf-selected");
+    let path_id = egui::Id::unique("xref-pdf-path-edit");
+    let key = |r: &PdfRow| format!("{}|{}", r.path, r.page);
+    let mut selected: Option<String> = ui.data(|d| d.get_temp(sel_id));
+    if !selected.as_ref().is_some_and(|s| rows.iter().any(|r| &key(r) == s)) {
+        selected = rows.first().map(key);
+    }
+    ui.add_space(8.0);
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.label(RichText::new(crate::tl!("PDF Underlays")).strong());
+        if ui.button(crate::tl!("Attach PDF...")).clicked() {
+            *act = Some(Act::Start("pdfattach"));
+        }
+        if ui.add_enabled(!rows.is_empty(), egui::Button::new(crate::tl!("Reload All"))).clicked() {
+            *act = Some(Act::ReloadPdfs(None));
+        }
+    });
+    if rows.is_empty() {
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        egui::Grid::new("xref-pdf-grid").num_columns(3).striped(true).spacing([10.0, 4.0]).show(ui, |ui| {
+            for h in [crate::tl!("Reference Name"), crate::tl!("Status"), crate::tl!("Saved Path")] {
+                ui.label(RichText::new(h).color(t.text_dim));
+            }
+            ui.end_row();
+            for r in &rows {
+                let on = selected.as_deref() == Some(key(r).as_str());
+                if ui.selectable_label(on, &r.name).clicked() {
+                    selected = Some(key(r));
+                    ui.data_mut(|d| d.remove::<String>(path_id));
+                }
+                let bad = r.status == "Not Found";
+                ui.label(RichText::new(crate::i18n::t(&r.status)).color(if bad { t.warn } else { t.text }));
+                ui.label(&r.path).on_hover_text(crate::tf!("References: {n}", n = r.references));
+                ui.end_row();
+            }
+        });
+    });
+    ui.data_mut(|d| match &selected {
+        Some(s) => {
+            d.insert_temp(sel_id, s.clone());
+        }
+        None => d.remove::<String>(sel_id),
+    });
+    let Some(r) = selected.as_ref().and_then(|s| rows.iter().find(|r| &key(r) == s)) else { return };
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.add_space(8.0);
+        if ui.button(crate::tl!("Reload")).clicked() {
+            *act = Some(Act::ReloadPdfs(Some((r.path.clone(), r.page))));
+        }
+        if ui.add_enabled(r.status != "Unloaded", egui::Button::new(crate::tl!("Unload"))).clicked() {
+            *act = Some(Act::Run("underlay.unload", json!({ "path": r.path, "page": r.page })));
+        }
+        if ui.button(crate::tl!("Detach")).clicked() {
+            *act = Some(Act::Run("underlay.detach", json!({ "path": r.path, "page": r.page })));
+        }
+    });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.label(crate::tl!("Saved Path"));
+        let mut text: String = ui.data(|d| d.get_temp(path_id)).unwrap_or_else(|| r.path.clone());
+        let w = (ui.available_width() - 70.0).max(60.0);
+        let edit = ui.add(egui::TextEdit::singleline(&mut text).desired_width(w));
+        let apply = ui.add_enabled(!text.trim().is_empty() && text != r.path, egui::Button::new(crate::tl!("Apply"))).clicked()
+            || (edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && text != r.path);
+        if apply {
+            *act = Some(Act::Run("underlay.path", json!({ "path": r.path, "page": r.page, "newPath": text.trim() })));
+            ui.data_mut(|d| d.remove::<String>(path_id));
+        } else if text != r.path {
+            ui.data_mut(|d| d.insert_temp(path_id, text));
+        } else {
+            ui.data_mut(|d| d.remove::<String>(path_id));
+        }
+    });
 }
 
 /// The palette body.
@@ -177,12 +306,27 @@ pub fn section(app: &mut CadApp, ui: &mut egui::Ui) {
         ui.separator();
         details(ui, r, path_id, &mut act);
     }
+    pdf_section(app, ui, &mut act);
     match act {
         Some(Act::Start(id)) => app.start(id),
         Some(Act::Run(id, p)) => {
             if let Err(e) = app.run(id, p) {
                 app.set_status(e);
             }
+        }
+        Some(Act::ReloadPdfs(which)) => {
+            // Pages read again; unloaded ones shown again.
+            let targets: Vec<(String, u32)> = match which {
+                Some(one) => vec![one],
+                None => pdf_rows(app, ui).into_iter().map(|r| (r.path, r.page)).collect(),
+            };
+            for (path, page) in targets {
+                if let Err(e) = app.run("underlay.reload", json!({ "path": path, "page": page })) {
+                    app.set_status(e);
+                }
+            }
+            app.canvas.underlays = Default::default();
+            ui.data_mut(|d| d.remove::<((u64, u64), Vec<PdfRow>)>(egui::Id::unique("xref-pdf-rows")));
         }
         None => {}
     }

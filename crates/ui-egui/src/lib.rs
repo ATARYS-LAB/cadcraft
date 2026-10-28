@@ -42,6 +42,7 @@ mod panel_state;
 mod pdfattach_dlg;
 pub mod spacemouse;
 pub mod switch;
+mod ulayers_dlg;
 // The External References palette.
 pub mod xrefs;
 

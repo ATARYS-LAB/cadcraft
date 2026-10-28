@@ -21,6 +21,7 @@ fn hooks() {
         region: |_, _, _, w, h| Ok((w, h, vec![255; (w * h * 4) as usize])),
         layers: |_| Ok(Vec::new()),
         with_layers: |bytes, _| Ok(bytes.to_vec()),
+        import: |_, _| Ok((Vec::new(), Vec::new(), Vec::new())),
     });
 }
 

@@ -12,6 +12,14 @@ use cadcraft_geom::{Vec2, Vec3};
 use serde_json::{Value, json};
 
 mod clip;
+mod import;
+mod join;
+mod layers;
+mod props;
+mod refs;
+
+pub use props::extents;
+pub use refs::definition_name;
 
 use super::machines::{SelOutcome, SelectPhase};
 use super::{CommandSpec, bad, point_value, str_param, targets};
@@ -35,7 +43,24 @@ pub struct PdfHooks {
     pub layers: fn(&[u8]) -> std::result::Result<Vec<(String, bool)>, String>,
     /// The PDF with the named layers shown or hidden (the others as by default).
     pub with_layers: fn(&[u8], &[(String, bool)]) -> std::result::Result<Vec<u8>, String>,
+    /// Page `page`'s vector content (PDFIMPORT): each path as its pieces (in mm from the page's
+    /// lower-left corner), which pieces are closed, its stroke (colour, width in mm), its fill
+    /// colour, its PDF layer and its pieces with their circular arcs kept (x, y, bulge to the
+    /// next point; empty when not read); its runs of visible text (see [`PdfText`]); and its
+    /// pictures (see [`PdfImage`]).
+    pub import: fn(&[u8], u32) -> std::result::Result<(Vec<PdfPath>, Vec<PdfText>, Vec<PdfImage>), String>,
 }
+
+/// A path of a PDF page read by [`PdfHooks::import`].
+pub type PdfPath = (Vec<Vec<(f64, f64)>>, Vec<bool>, Option<([u8; 3], f64)>, Option<[u8; 3]>, Option<String>, Vec<Vec<(f64, f64, f64)>>);
+/// A picture of a PDF page read by [`PdfHooks::import`]: a PNG file's bytes, its size in pixels,
+/// its lower-left corner (mm from the page's lower-left corner), one pixel's width and height
+/// vectors (mm), its PDF layer, and an identity shared by every placement of the same picture.
+pub type PdfImage = (Vec<u8>, (u32, u32), (f64, f64), (f64, f64), (f64, f64), Option<String>, u128);
+/// A run of text of a PDF page read by [`PdfHooks::import`]: the text, its first character's
+/// origin on the baseline (mm from the page's lower-left corner), its font size (one em, mm), its
+/// direction (radians), colour, PDF layer and font family.
+pub type PdfText = (String, (f64, f64), f64, f64, [u8; 3], Option<String>, Option<String>);
 
 /// The bytes of the PDF `stored` (in the drawing saved at `document`) with `layers` shown or
 /// hidden.
@@ -98,6 +123,14 @@ pub fn page_lines(stored: &str, page: u32, layers: &str) -> Option<PageLines> {
 
 /// Read and keep the lines of page `page` of the PDF `stored` (in the drawing saved at
 /// `document`), unless they are kept already. A file that can't be read gives no lines.
+/// Drop every page's lines read from the PDF `stored` (it changed on disk: RELOAD).
+pub(crate) fn forget_lines(stored: &str) {
+    let mut g = LINES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(map) = g.as_mut() {
+        map.retain(|(path, _, _), _| path != stored);
+    }
+}
+
 pub(crate) fn load_lines(stored: &str, document: Option<&str>, page: u32, layers: &[(String, bool)]) {
     let key = layers_key(layers);
     if page_lines(stored, page, &key).is_some() {
@@ -162,7 +195,13 @@ pub fn specs() -> Vec<CommandSpec> {
             .params("{handles?: PDF underlays (default the selection), fade?: 0..80, contrast?: 0..100, monochrome?: bool, adjustColors?: bool (on a dark background, white paper shows dark and dark lines light)} → {adjusted}")
             .interactive(|_| Ok(Box::new(AdjustM::default()))),
         clip::spec(),
+        layers::spec(),
+        import::spec(),
+        props::spec(),
     ]
+    .into_iter()
+    .chain(refs::specs())
+    .collect()
 }
 
 /// Most pages one PDFATTACH attaches.
