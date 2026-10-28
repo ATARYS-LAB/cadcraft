@@ -109,6 +109,9 @@ hayro = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff132ea
 hayro-interpret = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }
 hayro-cmap = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }
 hayro-postscript = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }
+# ATARYS: acadrust at the merge of hakanaktt/acadrust#204 (IMAGEDEF and RASTERVARIABLES reactors
+# written: AutoCAD lists images as unreferenced without them), until a release has it.
+acadrust = { git = "https://github.com/hakanaktt/acadrust", rev = "67c519ab5ffdefa7186c1e69146d3df55cddd21f" }
 
 # Keep the complete egui family and native event bridge on reviewed fork commits.
 ecolor = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
