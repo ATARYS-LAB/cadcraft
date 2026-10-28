@@ -41,6 +41,27 @@ fn hooks() {
             }
             Ok(b)
         },
+        // The two lines as stroked paths in mm (an A4 landscape page): the diagonal red on MURS,
+        // the horizontal green on COTES, plus a filled blue square and a picture on no layer. A file whose bytes
+        // say NOLAYERS has the same content on no PDF layer.
+        import: |bytes, _| {
+            let mm = |fx: f64, fy: f64| (fx * 297.0, fy * 210.0);
+            let no_layers = bytes.windows(8).any(|w| w == b"NOLAYERS");
+            let on = |l: &str| if no_layers { None } else { Some(l.to_string()) };
+            Ok((
+                vec![
+                    (vec![vec![mm(0.2, 0.2), mm(0.6, 0.6)]], vec![false], Some(([255, 0, 0], 0.5)), None, on("MURS"), vec![]),
+                    (vec![vec![mm(0.1, 0.5), mm(0.9, 0.5)]], vec![false], Some(([0, 255, 0], 0.25)), None, on("COTES"), vec![]),
+                    (vec![vec![mm(0.8, 0.1), mm(0.9, 0.1), mm(0.9, 0.2), mm(0.8, 0.2)]], vec![true], None, Some([0, 0, 255]), None, vec![]),
+                ],
+                vec![
+                    // A label on TEXTE, 10 mm em, turned 90°.
+                    ("SEJOUR".into(), mm(0.3, 0.3), 10.0, std::f64::consts::FRAC_PI_2, [0, 0, 255], on("TEXTE"), Some("Arial".into())),
+                ],
+                // A 4 x 2 picture, 2 mm pixels, at the page's middle, on no layer.
+                vec![(b"fake png".to_vec(), (4, 2), mm(0.5, 0.5), (2.0, 0.0), (0.0, 2.0), None, 7)],
+            ))
+        },
     });
 }
 
@@ -983,4 +1004,330 @@ fn pdfclip_takes_a_polyline_as_its_boundary() {
     }
     let u = the_underlay(&s);
     assert!(u.clipping && u.clip.len() == 4, "{:?} {:?}", u.clip, s.log);
+}
+
+#[test]
+fn pdfimport_of_a_pdf_without_layers_uses_one_layer_per_kind_of_object() {
+    hooks();
+    let path = pdf_file("Import-nolayers.pdf", b"%PDF-1.7 fake NOLAYERS");
+    let mut s = Session::empty();
+    s.new_drawing(true);
+    s.execute("pdfimport", &json!({"path": path})).unwrap();
+    let d = s.doc().unwrap();
+    let on = |k: fn(&EntityKind) -> bool| d.model.iter().filter(|e| k(&e.kind)).map(|e| e.common.layer.clone()).collect::<Vec<_>>();
+    assert!(on(|k| matches!(k, EntityKind::LwPolyline(_))).iter().all(|l| l == "PDF_Geometry"));
+    assert_eq!(on(|k| matches!(k, EntityKind::Solid(_))), vec!["PDF_Solid Fills"]);
+    assert_eq!(on(|k| matches!(k, EntityKind::MText(_))), vec!["PDF_Text"]);
+    // Each layer takes its first object's colour (nearest ACI): red geometry is ACI 1, ByLayer.
+    assert_eq!(d.layer("PDF_Geometry").unwrap().color, cadcraft_color::Color::Index(1));
+    assert!(d.model.iter().filter(|e| e.common.layer == "PDF_Text").all(|e| e.common.color == cadcraft_color::Color::ByLayer));
+}
+
+#[test]
+fn pdfimport_takes_pictures_out_as_png_files_beside_the_pdf_when_asked() {
+    use cadcraft_geom::Vec2;
+    hooks();
+    let path = pdf_file("Pictures.pdf", b"%PDF-1.7 fake");
+    let folder = std::path::Path::new(&path).parent().unwrap().join("PDF Images");
+    let _ = std::fs::remove_dir_all(&folder);
+    let mut s = Session::empty();
+    s.new_drawing(true);
+    let images = |s: &Session| -> Vec<(String, cadcraft_engine::doc::Image)> {
+        s.doc()
+            .unwrap()
+            .model
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EntityKind::Image(i) => Some((e.common.layer.clone(), i.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+    // Off by default, as AutoCAD.
+    s.execute("pdfimport", &json!({"path": path, "at": [100, 0], "scale": 2})).unwrap();
+    assert!(images(&s).is_empty() && !folder.exists());
+    s.execute("undo", &json!({})).unwrap();
+
+    s.execute("pdfimport", &json!({"path": path, "at": [100, 0], "scale": 2, "layers": "object", "images": true})).unwrap();
+    let got = images(&s);
+    assert_eq!(got.len(), 1);
+    let (layer, i) = &got[0];
+    assert_eq!(layer, "PDF_Images");
+    // Placed and sized as the page is: at twice its size, from (100, 0).
+    assert!(i.insert.xy().dist(Vec2::new(100.0 + 297.0, 210.0)) < 1e-9 && i.u.xy().dist(Vec2::new(4.0, 0.0)) < 1e-9, "{i:?}");
+    assert!(i.v.xy().dist(Vec2::new(0.0, 4.0)) < 1e-9 && i.size == Vec2::new(4.0, 2.0) && i.display == 15, "{i:?}");
+    // Its own file in "PDF Images" beside the PDF, named "images" and eight hexadecimal digits.
+    let file = std::path::Path::new(&i.path);
+    assert_eq!(file.parent(), Some(folder.as_path()));
+    let stem = i.name.strip_prefix("images").unwrap();
+    assert!(stem.len() == 8 && stem.chars().all(|c| c.is_ascii_hexdigit()), "{}", i.name);
+    assert_eq!(std::fs::read(file).unwrap(), b"fake png");
+    // Imported again: a new file, the first one kept.
+    s.execute("pdfimport", &json!({"path": path, "layers": "object", "images": true})).unwrap();
+    let again = images(&s);
+    assert_eq!(again.len(), 2);
+    assert_ne!(again[0].1.path, again[1].1.path);
+    assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
+    // Images go under the page's other objects: created first.
+    let first = s.doc().unwrap().model.iter().find(|e| !matches!(e.kind, EntityKind::PdfUnderlay(_))).unwrap().kind.clone();
+    assert!(matches!(first, EntityKind::Image(_)));
+}
+
+#[test]
+fn pdfimport_turns_the_page_into_objects_as_the_underlay_shows_it() {
+    use cadcraft_color::Color;
+    use cadcraft_engine::doc::Lineweight;
+    use cadcraft_geom::Vec2;
+    hooks();
+    let path = pdf_file("Import.pdf", b"%PDF-1.7 fake");
+    let mut s = Session::empty();
+    s.new_drawing(true);
+    let h = s.execute("pdfattach", &json!({"path": path, "at": [1000, 0], "scale": 2})).unwrap()["handle"].as_str().unwrap().to_string();
+    let objects = |s: &Session| -> Vec<(String, EntityKind, Color, Lineweight)> {
+        s.doc()
+            .unwrap()
+            .model
+            .iter()
+            .filter(|e| !matches!(e.kind, EntityKind::PdfUnderlay(_)))
+            .map(|e| (e.common.layer.clone(), e.kind.clone(), e.common.color, e.common.lineweight))
+            .collect()
+    };
+    let r = s.execute("pdfimport", &json!({"handle": h, "underlay": "keep"})).unwrap();
+    assert_eq!(r["created"], 4);
+    let o = objects(&s);
+    let at = |fx: f64, fy: f64| Vec2::new(1000.0 + fx * 594.0, fy * 420.0);
+    // The label: a multiline text on PDF_TEXTE in a "PDF Arial" style, 0.716 em high, attached
+    // middle left (half its height above the baseline, here turned 90°), as AutoCAD imports it.
+    let label = o.iter().find_map(|(l, k, c, _)| match k {
+        EntityKind::MText(t) => Some((l.clone(), t.clone(), *c)),
+        _ => None,
+    });
+    let (l, t, c) = label.unwrap();
+    assert_eq!((l.as_str(), t.contents.as_str(), t.style.as_str(), t.attach, c), ("PDF_TEXTE", "SEJOUR", "PDF Arial", 4, Color::ByLayer));
+    let th = 10.0 * 2.0 * 0.716;
+    assert!((t.height - th).abs() < 1e-9 && (t.rotation - std::f64::consts::FRAC_PI_2).abs() < 1e-12, "{t:?}");
+    assert!(t.insert.xy().dist(Vec2::new(1000.0 + 0.3 * 594.0 - th / 2.0, 0.3 * 420.0)) < 1e-6, "{t:?}");
+    assert_eq!(s.doc().unwrap().text_style("PDF Arial").map(|st| st.font.as_str()), Some("Arial"));
+    let fill = o.iter().find(|(_, k, ..)| matches!(k, EntityKind::Solid(_))).unwrap();
+    assert_eq!(fill.0, "0", "content on no PDF layer goes on the current layer");
+    let solid = s.doc().unwrap().model.iter().find(|e| matches!(e.kind, EntityKind::Solid(_))).unwrap();
+    assert_eq!(solid.common.transparency, cadcraft_engine::doc::Transparency::Percent(50), "half transparent, as AutoCAD");
+    assert!(s.doc().unwrap().layer("PDF_MURS").is_some() && s.doc().unwrap().layer("PDF_COTES").is_some(), "the PDF's layers are created");
+    s.execute("undo", &json!({})).unwrap();
+    assert!(objects(&s).is_empty(), "undone in one step");
+
+    // Hidden PDF layers and the clip boundary leave their content out.
+    s.execute("ulayers", &json!({"handle": h, "off": ["COTES"]})).unwrap();
+    s.execute("pdfclip", &json!({"handle": h, "rect": [[1000, 0], [1000.0 + 0.4 * 594.0, 420]]})).unwrap();
+    s.execute("pdfimport", &json!({"handle": h, "layers": "current", "fills": false, "texts": false, "underlay": "keep"})).unwrap();
+    let o = objects(&s);
+    assert_eq!(o.len(), 1, "{o:?}");
+    let EntityKind::LwPolyline(pl) = &o[0].1 else { panic!() };
+    assert!(pl.vertices.last().unwrap().p.dist(at(0.4, 0.4)) < 1e-6, "the diagonal cut at the boundary");
+    assert_eq!(o[0].0, "0");
+    s.execute("undo", &json!({})).unwrap();
+
+    // One layer per kind of object; the underlay detached.
+    s.execute("pdfclip", &json!({"handle": h, "delete": true})).unwrap();
+    s.execute("pdfimport", &json!({"handle": h, "layers": "object", "underlay": "detach"})).unwrap();
+    let o = objects(&s);
+    assert!(
+        o.iter().all(|(l, k, ..)| match k {
+            EntityKind::Solid(_) => l == "PDF_Solid Fills",
+            EntityKind::MText(_) => l == "PDF_Text",
+            _ => l == "PDF_Geometry",
+        }),
+        "{o:?}"
+    );
+    assert!(s.doc().unwrap().model.iter().all(|e| !matches!(e.kind, EntityKind::PdfUnderlay(_))), "detached");
+
+    // From a file, placed like PDFATTACH.
+    s.execute("pdfimport", &json!({"path": path, "at": [0, 1000], "lineweights": false})).unwrap();
+    assert!(
+        s.doc()
+            .unwrap()
+            .model
+            .iter()
+            .any(|e| matches!(&e.kind, EntityKind::LwPolyline(p) if p.vertices[0].p.dist(Vec2::new(0.2 * 297.0, 1000.0 + 0.2 * 210.0)) < 1e-6))
+    );
+    // By default, as AutoCAD, the underlay is unloaded afterwards; an area limits what comes.
+    let h2 = s.execute("pdfattach", &json!({"path": path, "at": [5000, 0]})).unwrap()["handle"].as_str().unwrap().to_string();
+    let before = objects(&s).len();
+    s.execute("pdfimport", &json!({"handle": h2, "area": [[5000, 0], [5000.0 + 0.45 * 297.0, 0.45 * 210.0]], "fills": false, "texts": false}))
+        .unwrap();
+    assert_eq!(objects(&s).len(), before + 1, "only the diagonal's lower half is in the area");
+    assert!(s.doc().unwrap().model.iter().any(|e| matches!(&e.kind, EntityKind::PdfUnderlay(u) if u.insert.x == 5000.0 && u.unloaded)));
+    for bad in [
+        json!({"handle": h, "layers": "x"}),
+        json!({"path": "/nope.pdf"}),
+        json!({}),
+        json!({"path": path, "underlay": "x"}),
+        json!({"path": path, "area": [[0, 0]]}),
+    ] {
+        assert!(s.execute("pdfimport", &bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn pdfimport_typed_asks_as_autocad() {
+    hooks();
+    let path = pdf_file("Import-typed.pdf", b"%PDF-1.7 fake");
+    let mut s = Session::empty();
+    s.new_drawing(true);
+    let h = s.execute("pdfattach", &json!({"path": path})).unwrap()["handle"].as_str().unwrap().to_string();
+    let count = |s: &Session| s.doc().unwrap().model.iter().filter(|e| !matches!(e.kind, EntityKind::PdfUnderlay(_))).count();
+    // The underlay, Settings: current layer, a window round the diagonal's lower half, Keep.
+    s.set_selection(vec![cadcraft_engine::doc::Handle::parse_hex(&h).unwrap()]);
+    for t in ["pdfimport", "s", "c", "0,0", "133,94", "k"] {
+        s.cmdline(t).unwrap();
+    }
+    assert_eq!(count(&s), 2, "the diagonal's lower half and the label: {:?}", s.log);
+    assert!(s.doc().unwrap().model.iter().all(|e| e.common.layer == "0"));
+    assert!(underlays(&s).iter().all(|u| !u.unloaded), "kept");
+    // All, then the default: unload.
+    s.set_selection(vec![cadcraft_engine::doc::Handle::parse_hex(&h).unwrap()]);
+    for t in ["pdfimport", "", ""] {
+        s.cmdline(t).unwrap();
+    }
+    assert_eq!(count(&s), 2 + 4, "{:?}", s.log);
+    assert!(underlays(&s).iter().all(|u| u.unloaded), "unloaded, as AutoCAD by default");
+    // From a file: name, page, point, scale, rotation.
+    for t in ["pdfimport", "f", path.as_str(), "2", "1000,0", "1", "0"] {
+        s.cmdline(t).unwrap();
+    }
+    assert_eq!(count(&s), 6 + 4, "{:?}", s.log);
+}
+
+#[test]
+fn the_pdf_references_are_listed_unloaded_detached_and_repathed() {
+    hooks();
+    let a = pdf_file("RefA.pdf", b"%PDF-1.7 fake");
+    let b = pdf_file("RefB.pdf", b"%PDF-1.7 fake");
+    let mut s = Session::empty();
+    s.new_drawing(true);
+    s.execute("pdfattach", &json!({"path": a, "page": 1})).unwrap();
+    s.execute("pdfattach", &json!({"path": a, "page": 1, "at": [0, -500]})).unwrap();
+    s.execute("pdfattach", &json!({"path": a, "page": 2, "at": [500, 0]})).unwrap();
+    s.execute("pdfattach", &json!({"path": b, "at": [0, 500]})).unwrap();
+    // One row per file and page, named as AutoCAD names the definition.
+    let list = s.execute("underlay.list", &json!({})).unwrap();
+    let pdfs = list["pdfs"].as_array().unwrap();
+    let names: Vec<&str> = pdfs.iter().map(|p| p["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["RefA - 1", "RefA - 2", "RefB - 1"]);
+    assert_eq!(pdfs[0]["references"], 2);
+    assert_eq!(pdfs[0]["status"], "Loaded");
+
+    // Unload page 1 of A: both its underlays hide (no page, no frame, out of the extents).
+    let pages = |s: &Session| cadcraft_render::build(s.doc().unwrap(), &Space::Model, &cadcraft_render::Options::default()).underlays.len();
+    assert_eq!(pages(&s), 4);
+    assert_eq!(s.execute("underlay.unload", &json!({"path": a, "page": 1})).unwrap()["unloaded"], 2);
+    assert_eq!(pages(&s), 2);
+    let list = s.execute("underlay.list", &json!({})).unwrap();
+    assert_eq!(list["pdfs"][0]["status"], "Unloaded");
+    let d = s.doc().unwrap();
+    let hidden =
+        d.model.iter().filter(|e| matches!(&e.kind, EntityKind::PdfUnderlay(u) if u.unloaded)).map(|e| entity_bounds(d, e, 0)).collect::<Vec<_>>();
+    assert!(hidden.len() == 2 && hidden.iter().all(|b| b.is_empty()), "the unloaded ones are out of the extents: {hidden:?}");
+    s.execute("underlay.reload", &json!({"path": a, "page": 1})).unwrap();
+    assert_eq!(pages(&s), 4);
+
+    // Another path: every underlay of the file follows.
+    let moved = pdf_file("RefA-moved.pdf", b"%PDF-1.7 fake");
+    let r = s.execute("underlay.path", &json!({"path": a, "newPath": moved})).unwrap();
+    assert_eq!(r["changed"], 3);
+    std::fs::remove_file(&moved).unwrap();
+    let list = s.execute("underlay.list", &json!({})).unwrap();
+    assert!(list["pdfs"].as_array().unwrap().iter().any(|p| p["path"] == moved.as_str() && p["status"] == "Not Found"));
+
+    // Detach: every underlay of the definition goes, undone in one step.
+    assert_eq!(s.execute("underlay.detach", &json!({"path": moved, "page": 2})).unwrap()["detached"], 1);
+    assert_eq!(underlays(&s).len(), 3);
+    s.execute("undo", &json!({})).unwrap();
+    assert_eq!(underlays(&s).len(), 4);
+    assert!(s.execute("underlay.detach", &json!({"path": "/nowhere.pdf"})).is_err());
+    assert!(s.execute("underlay.path", &json!({"path": b})).is_err());
+}
+
+#[test]
+fn the_properties_palette_sets_position_rotation_size_and_display() {
+    use cadcraft_engine::cmd::underlay::{definition_name, extents};
+    hooks();
+    let path = pdf_file("Proprietes.pdf", b"%PDF-1.7 fake");
+    let mut s = Session::empty();
+    s.new_drawing(true);
+    let h = s.execute("pdfattach", &json!({"path": path})).unwrap()["handle"].as_str().unwrap().to_string();
+    let u = |s: &Session| match &s.doc().unwrap().entity(cadcraft_engine::doc::Handle::parse_hex(&h).unwrap()).unwrap().kind {
+        EntityKind::PdfUnderlay(u) => u.clone(),
+        _ => unreachable!(),
+    };
+    assert_eq!(definition_name(&u(&s).path, 1), "Proprietes - 1");
+    // As AutoCAD's palette: a width of 594 doubles the scale (25.4 → 50.8), uniformly.
+    s.execute("underlay.set", &json!({"handles": [h], "width": 594})).unwrap();
+    assert!((u(&s).scale - 50.8).abs() < 1e-9, "{}", u(&s).scale);
+    // A height of 105: scale 12.7, the width follows (148.5).
+    s.execute("underlay.set", &json!({"handles": [h], "height": 105})).unwrap();
+    let (w, ht) = extents(&u(&s));
+    assert!((u(&s).scale - 12.7).abs() < 1e-9 && (w - 148.5).abs() < 1e-9 && (ht - 105.0).abs() < 1e-9);
+    // Width and height are the extents along the axes: 594 × 420 turned 30° shows 724.4194 × 660.731.
+    s.execute("underlay.set", &json!({"handles": [h], "scale": 50.8, "rotation": 30, "position": [10, 20]})).unwrap();
+    let (w, ht) = extents(&u(&s));
+    assert!((w - 724.4194).abs() < 1e-3 && (ht - 660.7307).abs() < 1e-3, "{w} {ht}");
+    assert!((u(&s).insert.x - 10.0).abs() < 1e-12 && (u(&s).insert.y - 20.0).abs() < 1e-12);
+    assert!((u(&s).rotation - 30f64.to_radians()).abs() < 1e-12);
+    // Not shown: the page goes, its frame stays to pick it by.
+    let list = |s: &Session| cadcraft_render::build(s.doc().unwrap(), &Space::Model, &cadcraft_render::Options::default());
+    assert_eq!(list(&s).underlays.len(), 1);
+    s.execute("underlay.set", &json!({"handles": [h], "shown": false})).unwrap();
+    assert!(u(&s).hidden && list(&s).underlays.is_empty() && !list(&s).prims.is_empty());
+    s.execute("underlay.set", &json!({"handles": [h], "shown": true})).unwrap();
+    assert!(!u(&s).hidden);
+    // Bad values are errors, the underlay unchanged.
+    for bad in [
+        json!({"handles": [h], "width": 0}),
+        json!({"handles": [h], "scale": -1}),
+        json!({"handles": [h], "shown": 2}),
+        json!({"handles": [h], "position": [1]}),
+    ] {
+        assert!(s.execute("underlay.set", &bad).is_err(), "{bad}");
+    }
+    assert!((u(&s).scale - 50.8).abs() < 1e-9);
+}
+
+#[test]
+fn ulayers_shows_and_hides_the_pdf_layers_of_one_underlay() {
+    use cadcraft_engine::snap::{mode, osnap};
+    use cadcraft_geom::Vec2;
+    hooks();
+    let path = pdf_file("Layers.pdf", b"%PDF-1.7 fake");
+    let mut s = Session::empty();
+    s.new_drawing(true);
+    let a = s.execute("pdfattach", &json!({"path": path})).unwrap()["handle"].as_str().unwrap().to_string();
+    let b = s.execute("pdfattach", &json!({"path": path, "at": [1000, 0]})).unwrap()["handle"].as_str().unwrap().to_string();
+    let r = s.execute("ulayers", &json!({"handle": a})).unwrap();
+    assert_eq!(r["layers"], json!([{"name": "MURS", "on": true}, {"name": "COTES", "on": true}]));
+
+    let r = s.execute("ulayers", &json!({"handle": a, "off": ["cot*"]})).unwrap();
+    assert_eq!(r["layers"], json!([{"name": "MURS", "on": true}, {"name": "COTES", "on": false}]));
+    // The horizontal line (COTES) no longer snaps on `a`; the diagonal (MURS) does; `b` keeps both.
+    let snap = |s: &Session, x0: f64, fx: f64, fy: f64, m| {
+        osnap(s.doc().unwrap(), &Space::Model, Vec2::new(x0 + fx * 297.0, fy * 210.0) + Vec2::new(0.7, -0.4), 3.0, m, None, false).map(|h| h.mode)
+    };
+    assert_eq!(snap(&s, 0.0, 0.9, 0.5, mode::END), None, "COTES hidden on a");
+    assert_eq!(snap(&s, 0.0, 0.2, 0.2, mode::END), Some(mode::END), "MURS shown on a");
+    assert_eq!(snap(&s, 1000.0, 0.9, 0.5, mode::END), Some(mode::END), "b keeps COTES");
+    let u = the_underlay(&s);
+    assert_eq!(u.layers, vec![cadcraft_engine::doc::UnderlayLayer { name: "COTES".into(), on: false }], "only what differs is kept");
+
+    s.execute("ulayers", &json!({"handle": a, "on": ["COTES"]})).unwrap();
+    assert!(the_underlay(&s).layers.is_empty(), "back to the PDF's default");
+    s.execute("undo", &json!({})).unwrap();
+    assert_eq!(the_underlay(&s).layers.len(), 1, "undone like any change");
+
+    // Typed.
+    s.set_selection(vec![cadcraft_engine::doc::Handle::parse_hex(&b).unwrap()]);
+    for t in ["ulayers", "off", "MURS", ""] {
+        s.cmdline(t).unwrap();
+    }
+    assert_eq!(snap(&s, 1000.0, 0.2, 0.2, mode::END), None, "{:?}", s.log);
+    assert!(s.execute("ulayers", &json!({"handle": a, "off": 3})).is_err());
 }

@@ -25,12 +25,13 @@ quick-xml = { workspace = true }
 hayro = { workspace = true }
 # Geometry types of the PDF reader's API (the version hayro uses).
 kurbo = "0.13"
+# PNG files of the pictures PDFIMPORT takes out of a page.
+tiny-skia = { workspace = true }
 # Which paths stored in a drawing (PDF underlays) may be opened.
 craft-docpath = { workspace = true }
 
 [dev-dependencies]
 # Reads CADCraft's DWG output as written (tests only; the same version as cadcraft-dwg's).
 acadrust = "0.6.5"
-tiny-skia = { workspace = true }
 # Reads plotted PDFs back.
 craft-pdf = { workspace = true, features = ["read"] }

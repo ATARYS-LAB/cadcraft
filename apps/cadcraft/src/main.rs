@@ -161,6 +161,7 @@ pub fn install_io() {
         region: cadcraft_io::pdf_read::render_page_region,
         layers: cadcraft_io::pdf_layers::layer_list,
         with_layers: cadcraft_io::pdf_layers::apply_layers,
+        import: cadcraft_io::pdf_import::import_hook,
     });
 }
 

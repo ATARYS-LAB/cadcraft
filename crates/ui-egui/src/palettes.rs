@@ -625,6 +625,88 @@ fn custom_properties(ui: &egui::Ui, app: &CadApp, h: cadcraft_engine::doc::Handl
     c
 }
 
+/// A PDF underlay's rows: Underlay Adjust, Geometry, Misc. Returns the
+/// command an edit runs (`pdfadjust` or `underlay.set`) and its parameters.
+fn underlay_properties(
+    ui: &mut egui::Ui,
+    group: &dyn Fn(&mut egui::Ui, &str),
+    u: &cadcraft_doc::PdfUnderlay,
+    ids: &[String],
+    len: &dyn Fn(f64) -> String,
+    shown_angle: &dyn Fn(f64) -> f64,
+    bad: &mut Option<String>,
+) -> Option<(&'static str, Value)> {
+    let mut out: Option<(&'static str, Value)> = None;
+    let real = |v: f64| format!("{v:.4}");
+    let num = |ui: &mut egui::Ui,
+               label: &str,
+               key: &str,
+               shown: String,
+               cmd: &'static str,
+               out: &mut Option<(&'static str, Value)>,
+               bad: &mut Option<String>| {
+        prop_row(ui, label, |ui| {
+            if let Some(f) = number(edit_field(ui, ui.scope_id().with(("pdf", key, ids)), shown), bad) {
+                *out = Some((cmd, json!({ "handles": ids, key: f })));
+            }
+        });
+    };
+    let yes_no = |ui: &mut egui::Ui, label: &str, on: bool, enabled: bool, key: &str, cmd: &'static str, out: &mut Option<(&'static str, Value)>| {
+        prop_row(ui, label, |ui| {
+            let mut v = on;
+            let text = crate::i18n::t(if on { "Yes" } else { "No" });
+            if ui.add_enabled(enabled, egui::Checkbox::new(&mut v, text)).changed() {
+                *out = Some((cmd, json!({ "handles": ids, key: v })));
+            }
+        });
+    };
+    group(ui, "Underlay Adjust");
+    num(ui, "Contrast", "contrast", u.contrast.to_string(), "pdfadjust", &mut out, bad);
+    num(ui, "Fade", "fade", u.fade.to_string(), "pdfadjust", &mut out, bad);
+    yes_no(ui, "Monochrome", u.monochrome, true, "monochrome", "pdfadjust", &mut out);
+    yes_no(ui, "Adjust colors for background", u.adjust_colors, true, "adjustColors", "pdfadjust", &mut out);
+    group(ui, "Geometry");
+    let p = u.insert;
+    for (i, label) in ["Position X", "Position Y", "Position Z"].into_iter().enumerate() {
+        let v = [p.x, p.y, p.z][i];
+        prop_row(ui, label, |ui| {
+            if let Some(f) = number(edit_field(ui, ui.scope_id().with(("pdf-pos", i, ids)), len(v)), bad) {
+                let mut at = [p.x, p.y, p.z];
+                at[i] = f;
+                out = Some(("underlay.set", json!({ "handles": ids, "position": at })));
+            }
+        });
+    }
+    num(ui, "Rotation", "rotation", real(shown_angle(u.rotation)), "underlay.set", &mut out, bad);
+    // Unloaded: no page size, so no width and height.
+    if !u.unloaded {
+        let (w, h) = cadcraft_engine::cmd::underlay::extents(u);
+        num(ui, "Width", "width", len(w), "underlay.set", &mut out, bad);
+        num(ui, "Height", "height", len(h), "underlay.set", &mut out, bad);
+    }
+    num(ui, "Scale", "scale", real(u.scale), "underlay.set", &mut out, bad);
+    group(ui, "Misc");
+    prop_row(ui, "Name", |ui| read_only(ui, &cadcraft_engine::cmd::underlay::definition_name(&u.path, u.page)));
+    prop_row(ui, "Page number", |ui| read_only(ui, &u.page.to_string()));
+    prop_row(ui, "Saved path", |ui| read_only(ui, &u.path));
+    yes_no(ui, "Show underlay", !u.hidden, true, "shown", "underlay.set", &mut out);
+    yes_no(ui, "Show clip", u.clipping, true, "showClip", "underlay.set", &mut out);
+    prop_row(ui, "Layer display override", |ui| read_only(ui, if u.layers.is_empty() { "None" } else { "Applied" }));
+    // The adjustment fields take whole numbers.
+    if let Some(("pdfadjust", p)) = &mut out
+        && let Some(o) = p.as_object_mut()
+    {
+        for k in ["contrast", "fade"] {
+            if let Some(v) = o.get_mut(k)
+                && let Some(f) = v.as_f64()
+            {
+                *v = json!(f.round() as i64);
+            }
+        }
+    }
+    out
+}
+
 /// A greyed value computed from the geometry.
 fn read_only(ui: &mut egui::Ui, text: &str) {
     value_box(ui, crate::i18n::t(text), false, false).on_hover_text(crate::tl!("Read-only"));
@@ -993,7 +1075,13 @@ pub(crate) fn properties_section(app: &mut CadApp, ui: &mut egui::Ui) {
             });
         });
     });
-    if sel.len() == 1 {
+    let mut underlay_cmd: Option<(&str, Value)> = None;
+    if sel.len() == 1
+        && let EntityKind::PdfUnderlay(u) = &e.kind
+    {
+        let angles = app.session.angle_settings();
+        underlay_cmd = underlay_properties(ui, &group, u, &ids, &len, &|r| angles.shown(r).to_degrees(), &mut bad);
+    } else if sel.len() == 1 {
         group(ui, "Geometry");
         let real = |v: f64| format!("{v:.4}");
         // Rotations show as the drawing measures directions (ANGBASE, ANGDIR).
@@ -1169,6 +1257,15 @@ pub(crate) fn properties_section(app: &mut CadApp, ui: &mut egui::Ui) {
             *r = json!(app.session.angle_settings().unshown(v.to_radians()).to_degrees());
         }
         let _ = app.run("properties.set", p);
+    }
+    if let Some((c, mut p)) = underlay_cmd {
+        // A rotation is typed as shown (from ANGBASE, in the ANGDIR sense).
+        if let Some(r) = p.get_mut("rotation")
+            && let Some(v) = r.as_f64()
+        {
+            *r = json!(app.session.angle_settings().unshown(v.to_radians()).to_degrees());
+        }
+        let _ = app.run(c, p);
     }
     report_bad(app, bad);
     if let Some(p) = custom_set {

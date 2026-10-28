@@ -1392,3 +1392,34 @@
 	Could not check for updates.	Не вдалося перевірити оновлення.
 	Save changes to block "{name}"?	Зберегти зміни в блоці «{name}»?
 	Clip PDF Underlay	Обрізати підкладку PDF
+	Underlay Layers...	Шари підкладки...
+	Layers...	Шари...
+	Underlay Layers	Шари підкладки
+	The PDF has no layers.	PDF не має шарів.
+	Show all	Показати всі
+	Hide all	Сховати всі
+	Search layer	Пошук шару
+	PDF Import	Імпорт PDF
+	PDF Underlays	Підкладки PDF
+	Attach PDF...	Приєднати PDF...
+	PDF References	Посилання PDF
+	Detach PDF	Від'єднати PDF
+	Change PDF Path	Змінити шлях PDF
+	Unload PDF	Вивантажити PDF
+	Reload PDF	Перезавантажити PDF
+	Details	Подробиці
+	Insertion point	Точка вставки
+	Underlay Adjust	Налаштування підкладки
+	Contrast	Контраст
+	Fade	Згасання
+	Monochrome	Монохромний
+	Adjust colors for background	Підлаштувати кольори під тло
+	Width	Ширина
+	Misc	Інше
+	Page number	Номер сторінки
+	Saved path	Збережений шлях
+	Show underlay	Показувати підкладку
+	Show clip	Показувати обрізання
+	Layer display override	Шари PDF змінено
+	Applied	Застосовано
+	PDF Underlay Properties	Властивості PDF-підкладки

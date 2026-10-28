@@ -15,6 +15,7 @@ mod dxf_underlay;
 mod dxf_write;
 mod dxf_xref;
 pub mod pdf;
+pub mod pdf_import;
 /// PDF pages read for PDF underlays (PDFATTACH).
 pub mod pdf_layers;
 pub mod pdf_read;

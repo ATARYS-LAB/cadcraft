@@ -128,6 +128,41 @@ impl PdfFile {
     }
 }
 
+impl PdfFile {
+    /// The base font names page `page` (1-based) names in its resources (BaseFont).
+    pub(crate) fn font_names(&self, page: usize) -> Result<Vec<String>> {
+        let p = self.page(page)?;
+        let fonts = &p.resources().fonts;
+        Ok(fonts
+            .keys()
+            .filter_map(|k| fonts.get::<hayro::hayro_syntax::object::Dict<'_>>(k.as_ref()))
+            .filter_map(|f| f.get::<hayro::hayro_syntax::object::Name<'_>>(b"BaseFont"))
+            .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
+            .take(1000)
+            .collect())
+    }
+
+    /// Run page `page` (1-based) through the device `make` builds from the page's size in points
+    /// (device space, y down, after the page's rotation), and give back what `finish` takes from
+    /// it.
+    pub(crate) fn with_device<D, T>(&self, page: usize, make: impl FnOnce((f64, f64)) -> D, finish: impl FnOnce(D) -> T) -> Result<T>
+    where
+        D: for<'a> hayro::hayro_interpret::Device<'a>,
+    {
+        use hayro::hayro_interpret::util::TransformExt;
+        let (w, h) = self.points(page)?;
+        let p = self.page(page)?;
+        guarded(|| {
+            let cache = hayro::hayro_interpret::InterpreterCache::new();
+            let bbox = kurbo::Rect::new(0.0, 0.0, w, h);
+            let mut cx = hayro::hayro_interpret::Context::new(p.initial_transform(true).to_kurbo(), bbox, &cache, p.xref(), interpreter());
+            let mut device = make((w, h));
+            hayro::hayro_interpret::interpret_page(p, &mut cx, &mut device);
+            finish(device)
+        })
+    }
+}
+
 /// A PDF device that keeps the paths' geometry and nothing else.
 struct Lines {
     out: Vec<Vec<(f64, f64)>>,

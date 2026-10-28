@@ -292,6 +292,16 @@ fn should_pick_file_path(id: &str, params: &Value) -> bool {
     if id.starts_with("ui.") { params.is_null() || (params.get("path").is_none() && params.get("data").is_none()) } else { params.is_null() }
 }
 
+/// ULAYERS with a PDF underlay selected: its Underlay Layers dialog; `None` without one (the
+/// prompts then select one).
+fn ulayers_dialog(app: &mut CadApp) -> Option<Result<Value, String>> {
+    let h = app.session.state().ok().and_then(|st| {
+        app.session.selection().into_iter().find(|h| matches!(st.doc.entity(*h).map(|e| &e.kind), Some(cadcraft_doc::EntityKind::PdfUnderlay(_))))
+    })?;
+    app.ui.dialog = Some(format!("ulayers:{}", h.hex()));
+    Some(Ok(Value::Null))
+}
+
 fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Result<Value, String>> {
     if let Some(result) = route_ui_subsystems(app, id, params) {
         return Some(result);
@@ -393,6 +403,9 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
             app.ui.start_tab = false;
             Ok(Value::Null)
         }
+        // ULAYERS with a PDF underlay selected: the Underlay Layers dialog (else the prompts
+        // select one).
+        "ulayers" if params.is_null() => return ulayers_dialog(app),
         "export" | "exp" | "import" | "imp" | "pdfattach" | "publish" | "preview" | "pre" if params.is_null() && app.session.state().is_ok() => {
             return Some(crate::exchange::route(app, id));
         }
