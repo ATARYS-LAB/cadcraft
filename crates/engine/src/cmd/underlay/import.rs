@@ -15,7 +15,7 @@ use cadcraft_geom::{PolyVertex, Vec2, Vec3};
 use cadcraft_render::clip::PolyClip;
 use serde_json::{Value, json};
 
-use super::super::{CommandSpec, bad, bool_or, f64_or, point_value, points_param, str_param, targets};
+use super::super::{CommandSpec, bad, bool_or, point_value, points_param, str_param, targets};
 use super::{PageSize, pdf, read_pdf, underlay_file};
 use crate::{Result, Session};
 
@@ -107,10 +107,11 @@ fn source(s: &Session, p: &Value, hooks: &super::PdfHooks) -> Result<Source> {
         Some(v) => v.as_f64().filter(|k| k.is_finite() && (1e-9..=1e9).contains(k)).ok_or_else(|| bad(ID, "`scale` must be a positive number"))?,
         None => 1.0,
     };
-    let rotation = f64_or(p, "rotation", 0.0);
-    if !rotation.is_finite() {
-        return Err(bad(ID, "`rotation` must be a number of degrees"));
-    }
+    // Strict like the other parameters: "90" or true is refused, not taken as 0.
+    let rotation = match p.get("rotation") {
+        None | Some(Value::Null) => 0.0,
+        Some(v) => v.as_f64().filter(|r| r.is_finite()).ok_or_else(|| bad(ID, "`rotation` must be a number of degrees"))?,
+    };
     let bytes = read_pdf(path)?;
     let (_, w_mm, h_mm, per_point) = (hooks.page)(&bytes, page).map_err(|e| bad(ID, format!("{path}: {e}")))?;
     let size = PageSize::new(w_mm, h_mm, per_point).ok_or_else(|| bad(ID, format!("{path}: page {page} has no usable size")))?;

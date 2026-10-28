@@ -97,6 +97,17 @@ fn a_page_is_attached_at_its_size_on_paper() {
 }
 
 #[test]
+fn pdfimport_refuses_a_rotation_that_is_not_a_number() {
+    hooks();
+    let path = pdf_file("ImportRotation.pdf", b"%PDF-1.7 fake");
+    let mut s = Session::empty();
+    s.new_drawing(true);
+    let r = s.execute("pdfimport", &json!({"path": path, "rotation": "90"}));
+    assert!(r.as_ref().is_err_and(|e| e.to_string().contains("rotation")), "{r:?}");
+    assert!(s.execute("pdfimport", &json!({"path": path, "rotation": 90})).is_ok());
+}
+
+#[test]
 fn a_rotation_that_is_not_a_number_is_refused() {
     hooks();
     let path = pdf_file("Rotation.pdf", b"%PDF-1.7 fake");
