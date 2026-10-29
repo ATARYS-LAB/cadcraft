@@ -24,6 +24,7 @@ fn a_page_s_lines_are_not_read_twice_at_the_same_time() {
         region: |_, _, _, w, h| Ok((w, h, vec![255; (w * h * 4) as usize])),
         layers: |_| Ok(Vec::new()),
         with_layers: |bytes, _| Ok(bytes.to_vec()),
+        import: |_, _| Ok((Vec::new(), Vec::new(), Vec::new())),
     });
     use cadcraft_engine::cmd::file::{IoHooks, set_io};
     set_io(IoHooks {
