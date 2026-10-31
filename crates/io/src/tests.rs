@@ -1521,6 +1521,7 @@ fn oversized_dwg_and_dxf_are_rejected_early() {
 /// types, so a partial read never passes for a complete one. A complete read has no notes.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+#[ignore = "acadrust#276: with acadrust 0.6.7 one damaged copy hits the *Model_Space name and reads empty (fixed by acadrust#277)"]
 fn damaged_dwg_opens_partially_and_says_what_it_left_out() {
     let mut dxf = String::from("0\nSECTION\n2\nENTITIES\n");
     for i in 0..200 {

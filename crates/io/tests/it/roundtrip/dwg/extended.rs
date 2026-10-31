@@ -200,6 +200,7 @@ fn mtext_contents() {
     check(geometry::mtext_contents());
 }
 #[test]
+#[ignore = "acadrust#260: CIF escapes kept as text since 0.6.7 (fixed by acadrust#267)"]
 fn mtext_long() {
     check(geometry::mtext_long());
 }
