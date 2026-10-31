@@ -20,6 +20,7 @@ fn opening_from_the_window_does_not_wait_for_the_lines() {
         region: |_, _, _, w, h| Ok((w, h, vec![255; (w * h * 4) as usize])),
         layers: |_| Ok(Vec::new()),
         with_layers: |bytes, _| Ok(bytes.to_vec()),
+        import: |_, _| Ok((Vec::new(), Vec::new(), Vec::new())),
     });
     use cadcraft_engine::cmd::file::{IoHooks, set_io};
     set_io(IoHooks {
