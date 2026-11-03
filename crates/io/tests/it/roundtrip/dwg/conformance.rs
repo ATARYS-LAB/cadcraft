@@ -12,7 +12,6 @@ use cadcraft_io::{SaveOptions, Version, read, write_with};
 use std::io::Cursor;
 
 #[test]
-#[ignore = "acadrust#260: CIF escapes kept as text since 0.6.7 (fixed by acadrust#267)"]
 fn writer_populates_native_geometry_without_our_reader() {
     let source = cases::common_case("native-writer", Common::default());
     for version in Version::ALL {
