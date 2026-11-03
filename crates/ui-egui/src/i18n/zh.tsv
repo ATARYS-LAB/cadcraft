@@ -1481,3 +1481,12 @@ menu	View	视图
 	Ctrl+Enter to apply	Ctrl+Enter 应用
 	Edit Text	编辑文字
 	The drawing changed. Close the window and open it again.	图纸已切换。请关闭窗口后重新打开。
+	Change PDF Path	修改 PDF 路径
+	Detach PDF	分离 PDF
+	Layers...	图层...
+	PDF Import	PDF 导入
+	PDF References	PDF 参照
+	PDF Underlay Properties	PDF 参考底图特性
+	Reload PDF	重新加载 PDF
+	Underlay Layers...	参考底图图层...
+	Unload PDF	卸载 PDF
