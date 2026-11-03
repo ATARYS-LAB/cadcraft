@@ -118,6 +118,14 @@ fn route_ui_subsystems(app: &mut CadApp, id: &str, params: &Value) -> Option<Res
     if let Some(r) = crate::plotstyles::route(app, id, params) {
         return Some(r);
     }
+    // ULAYERS with a PDF underlay selected: the Underlay Layers dialog (else the prompts
+    // select one).
+    if id == "ulayers"
+        && params.is_null()
+        && let Some(r) = ulayers_dialog(app)
+    {
+        return Some(r);
+    }
     if let Some(r) = crate::options::route(app, id, params) {
         return Some(r);
     }
@@ -427,9 +435,6 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
             app.ui.start_tab = false;
             Ok(Value::Null)
         }
-        // ULAYERS with a PDF underlay selected: the Underlay Layers dialog (else the prompts
-        // select one).
-        "ulayers" if params.is_null() => return ulayers_dialog(app),
         "export" | "exp" | "import" | "imp" | "pdfattach" | "publish" | "preview" | "pre" if params.is_null() && app.session.state().is_ok() => {
             return Some(crate::exchange::route(app, id));
         }
