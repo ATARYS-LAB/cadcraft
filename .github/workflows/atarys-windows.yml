@@ -1,0 +1,72 @@
+# ATARYS fork only: never part of a PR to storytold/cadcraft (pull requests start from main, not atarys).
+# Builds the atarys branch for Windows x64 and publishes a portable zip as a prerelease of this fork,
+# tagged atarys-<short sha>. The two newest builds are kept.
+name: ATARYS Windows
+
+on:
+  push:
+    branches: [atarys]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: atarys-windows
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    if: github.repository == 'ATARYS-LAB/cadcraft'
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build
+        shell: pwsh
+        env:
+          # Static CRT, as packaging/windows/package.ps1: no VC++ redistributable needed.
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+          CADCRAFT_BUILD_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup target add x86_64-pc-windows-msvc
+          cargo build --release --locked -p cadcraft -p cadcraft-cli --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+
+      - name: Package
+        id: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Short = '${{ github.sha }}'.Substring(0, 8)
+          $Name = "cadcraft-atarys-$Short-windows"
+          $Bin = 'target\x86_64-pc-windows-msvc\release'
+          New-Item -ItemType Directory -Force -Path "dist\$Name" | Out-Null
+          Copy-Item "$Bin\cadcraft.exe", "$Bin\cadcraft-cli.exe" "dist\$Name"
+          foreach ($f in 'README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE', 'ATTRIBUTION.md') {
+            if (Test-Path $f) { Copy-Item $f "dist\$Name" }
+          }
+          & "dist\$Name\cadcraft-cli.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "cadcraft-cli --version failed" }
+          Compress-Archive -Path "dist\$Name" -DestinationPath "dist\$Name.zip"
+          "short=$Short" >> $env:GITHUB_OUTPUT
+          "zip=dist\$Name.zip" >> $env:GITHUB_OUTPUT
+
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Tag = 'atarys-${{ steps.package.outputs.short }}'
+          gh release delete $Tag --yes --cleanup-tag 2>$null
+          gh release create $Tag '${{ steps.package.outputs.zip }}' --target '${{ github.sha }}' --prerelease `
+            --title "ATARYS ${{ steps.package.outputs.short }} (Windows)" `
+            --notes "Build of the atarys branch at ${{ github.sha }}. Internal use; not an official CADCraft release."
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+          # Keep the two newest atarys builds.
+          $Old = gh release list --limit 100 --json tagName,createdAt | ConvertFrom-Json |
+            Where-Object { $_.tagName -like 'atarys-*' } | Sort-Object createdAt -Descending | Select-Object -Skip 2
+          foreach ($r in $Old) { gh release delete $r.tagName --yes --cleanup-tag }
