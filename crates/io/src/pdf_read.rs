@@ -206,11 +206,7 @@ impl Lines {
                         current.push(q);
                     }
                 }
-                PathEl::LineTo(p) => {
-                    if !full(&current, used) {
-                        current.push(to(p));
-                    }
-                }
+                PathEl::LineTo(p) if !full(&current, used) => current.push(to(p)),
                 PathEl::ClosePath => {
                     if let Some(s) = start
                         && !full(&current, used)
