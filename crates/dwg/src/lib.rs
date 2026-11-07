@@ -704,8 +704,9 @@ mod native {
     /// The ASCII DXF with its `$ACADVER` set to `kept` when that is newer than the version it
     /// declares, or `None` to read it as it is (binary, no `$ACADVER`, or non-ASCII text without a
     /// `$DWGCODEPAGE` to decode it by). From AutoCAD 2007 (AC1021) a DXF is UTF-8, so other bytes
-    /// are first decoded with the code page the DXF declares; `\U+XXXX` escapes read the same in
-    /// every version, and CADCraft's R2000 DXF is ASCII with such escapes.
+    /// are first decoded with the code page the DXF declares. Its `\U+XXXX` escapes are text, but
+    /// an older DXF's are characters (CADCraft's R2000 DXF is ASCII with such escapes), so they
+    /// are decoded too.
     pub(super) fn declare_version(dxf: &[u8], kept: acadrust::DxfVersion) -> Option<Vec<u8>> {
         if dxf.starts_with(b"AutoCAD Binary DXF") {
             return None;
@@ -732,6 +733,11 @@ mod native {
                 None => std::borrow::Cow::Borrowed(std::str::from_utf8(dxf).ok()?.as_bytes()),
             }
         };
+        let text = if declared < acadrust::DxfVersion::AC1021 && kept >= acadrust::DxfVersion::AC1021 {
+            std::borrow::Cow::Owned(decode_escapes(std::str::from_utf8(&text).ok()?).into_bytes())
+        } else {
+            text
+        };
         let (at, value) = header_value(&text, b"$ACADVER")?;
         let code = kept.to_string();
         let mut out = Vec::with_capacity(text.len().saturating_add(code.len()));
@@ -739,6 +745,27 @@ mod native {
         out.extend_from_slice(code.as_bytes());
         out.extend_from_slice(text.get(at.checked_add(value.len())?..)?);
         Some(out)
+    }
+
+    /// An older DXF's `\U+XXXX` and `\M+` escapes decoded, line by line as acadrust reads that
+    /// DXF. A line whose escapes would decode to a line break keeps them: written out, the break
+    /// would split the group.
+    fn decode_escapes(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        for (i, line) in text.split('\n').enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            let (body, cr) = line.strip_suffix('\r').map_or((line, ""), |b| (b, "\r"));
+            if !(body.contains("\\U+") || body.contains("\\M+")) {
+                out.push_str(line);
+                continue;
+            }
+            let decoded = acadrust::io::dxf::code_page::decode_legacy_escapes(body);
+            out.push_str(if decoded.contains(['\n', '\r']) { body } else { &decoded });
+            out.push_str(cr);
+        }
+        out
     }
 
     /// The byte offset and the trimmed value of header variable `name` in an ASCII DXF: the value
@@ -1558,9 +1585,24 @@ mod tests {
     #[cfg(not(no_dwg_bridge))]
     #[test]
     fn declare_version_changes_only_acadver() {
-        let dxf = r2000(b"A\\U+00E7\\U+00E3o");
+        let dxf = r2000(b"Acao");
         let out = native::declare_version(&dxf, acadrust::DxfVersion::AC1032).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), String::from_utf8(dxf).unwrap().replacen("AC1015", "AC1032", 1));
+    }
+
+    /// Declared as 2007 or later, a DXF's `\U+XXXX` escapes are text, as acadrust reads them from
+    /// 0.6.9, so an older DXF's escapes are decoded with its version. One that would decode to a
+    /// line break stays, and so does every escape when the version stays before 2007.
+    #[cfg(not(no_dwg_bridge))]
+    #[test]
+    fn declare_version_decodes_escapes_for_utf8_versions() {
+        let dxf = r2000(b"A\\U+00E7\\U+00E3o");
+        let text = String::from_utf8(native::declare_version(&dxf, acadrust::DxfVersion::AC1032).unwrap()).unwrap();
+        assert!(text.contains("\r\nAção\r\n") && text.contains("$ACADVER\r\n  1\r\nAC1032\r\n"), "{text}");
+        let legacy = String::from_utf8(native::declare_version(&dxf, acadrust::DxfVersion::AC1018).unwrap()).unwrap();
+        assert!(legacy.contains("\r\nA\\U+00E7\\U+00E3o\r\n"), "{legacy}");
+        let broken = String::from_utf8(native::declare_version(&r2000(b"a\\U+000Ab\\U+00E7"), acadrust::DxfVersion::AC1032).unwrap()).unwrap();
+        assert!(broken.contains("\r\na\\U+000Ab\\U+00E7\r\n"), "{broken}");
     }
 
     /// A kept version not newer than the declared one, a binary DXF and a DXF without `$ACADVER`
