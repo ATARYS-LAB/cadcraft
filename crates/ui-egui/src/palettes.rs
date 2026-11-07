@@ -1177,7 +1177,7 @@ pub(crate) fn properties_section(app: &mut CadApp, ui: &mut egui::Ui) {
     if sel.len() == 1
         && let EntityKind::PdfUnderlay(u) = &e.kind
     {
-        underlay_cmd = underlay_properties(ui, &group, u, &ids, &len, &|r| angles.shown(r).to_degrees(), &mut bad);
+        underlay_cmd = underlay_properties(ui, &group, u, ids, &len, &|r| angles.shown(r).to_degrees(), &mut bad);
     } else if sel.len() == 1 {
         group(ui, "Geometry");
         match &e.kind {
